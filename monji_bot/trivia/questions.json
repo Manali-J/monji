@@ -1,0 +1,22 @@
+[
+  {
+    "question": "What is the capital of France?",
+    "answers": ["paris"]
+  },
+  {
+    "question": "Which planet is known as the Red Planet?",
+    "answers": ["mars"]
+  },
+  {
+    "question": "Who wrote the play 'Romeo and Juliet'?",
+    "answers": ["william shakespeare", "shakespeare"]
+  },
+  {
+    "question": "What is the chemical symbol for water?",
+    "answers": ["h2o"]
+  },
+  {
+    "question": "Which language is primarily spoken in Brazil?",
+    "answers": ["portuguese", "brazilian portuguese"]
+  }
+]
