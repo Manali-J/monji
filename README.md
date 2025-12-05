@@ -13,7 +13,6 @@ This version uses PostgreSQL for storing trivia questions.
 
 1. Create `.env` file:
 BOT_TOKEN=your_token_here
-DATABASE_URL=postgresql://user:pass@localhost:5432/monji
 
 2. Install dependencies: pip install -r requirements.txt
 

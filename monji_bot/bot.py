@@ -5,7 +5,8 @@ import discord
 from discord.ext import commands
 
 from .config import BOT_TOKEN
-from .trivia.manager import load_questions, get_random_question
+from .trivia.manager import get_random_question
+from .db import init_schema
 from .utils.fuzzy import is_fuzzy_match
 
 intents = discord.Intents.default()
@@ -36,8 +37,8 @@ GAMES: dict[int, dict] = {}
 
 @bot.event
 async def on_ready():
-    # Load questions from questions.json when Monji starts
-    load_questions()
+    # Ensure DB table exists (idempotent)
+    await init_schema()
     print(f"Monji is online as {bot.user}")
 
 
@@ -75,7 +76,7 @@ async def trivia_command(ctx: commands.Context):
         return
 
     # Get a random question
-    q = get_random_question()
+    q = await get_random_question()
     if q is None:
         await ctx.send(
             "I have no questions loaded. Someone forgot to feed me `questions.json`."
@@ -151,7 +152,7 @@ async def trivia_start(ctx: commands.Context, rounds: int):
 
 async def ask_next_round(channel: discord.TextChannel, state: dict):
     """Ask the next question in a multi-round game."""
-    q = get_random_question()
+    q = await get_random_question()
     if q is None:
         await channel.send(
             "I ran out of questions. Blame whoever configured me."
