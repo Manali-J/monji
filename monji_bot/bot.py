@@ -11,19 +11,15 @@ from .utils.fuzzy import is_fuzzy_match
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True  # for later when we add leaderboards
+intents.members = True  # needed for resolving display names
 
 bot = commands.Bot(
-    command_prefix="!",
+    command_prefix="!",  # prefix is unused now, but harmless to keep
     intents=intents,
-    help_command=None
+    help_command=None,
 )
 
-# One-shot question state for !trivia:
-# channel_id -> { "question": str, "answers": [str], "winner_id": int | None }
-ACTIVE_QUESTIONS: dict[int, dict] = {}
-
-# Multi-round game state for !trivia_start:
+# Multi-round game state for /trivia:
 # channel_id -> {
 #   "round": int,
 #   "max_rounds": int,
@@ -40,6 +36,7 @@ GAMES: dict[int, dict] = {}
 HINT_DELAY_SECONDS = 30       # time before first hint
 HINT_INTERVAL_SECONDS = 24    # time between hints
 FINAL_WAIT_SECONDS = 20       # time after last hint before giving up
+
 
 def build_hint(answer: str, level: int) -> str:
     """
@@ -78,87 +75,53 @@ async def on_ready():
     # Make sure DB schema (questions + user_scores) exists
     await init_schema()
 
-    # 🔥 Sync slash commands with Discord
+    # Sync slash commands with Discord
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} app commands.")
     except Exception as e:
         print(f"❌ Error syncing app commands: {e}")
 
-@bot.command()
-async def ping(ctx: commands.Context):
-    """Simple test command."""
-    await ctx.send("Pong! Monji is awake... unfortunately.")
-
 
 # -----------------------------
-# SINGLE QUESTION: !trivia
+# SIMPLE PING COMMAND
 # -----------------------------
-@bot.command(name="trivia")
-async def trivia_command(ctx: commands.Context):
-    """
-    Start a single trivia question in this channel.
-    Monji will ask a question, and the first correct typed answer wins.
-    """
-    channel = ctx.channel
-
-    # If there's already an active multi-round game, don’t allow single-question mode.
-    game_state = GAMES.get(channel.id)
-    if game_state and game_state.get("in_progress"):
-        await ctx.send(
-            "There’s already a trivia game running here. Finish that first, overachiever."
-        )
-        return
-
-    # If there's already an active single question with no winner, don't start another
-    state = ACTIVE_QUESTIONS.get(channel.id)
-    if state and state.get("winner_id") is None:
-        await ctx.send(
-            "There’s already a question running here. Try answering that one first."
-        )
-        return
-
-    # Get a random question
-    q = await get_random_question()
-    if q is None:
-        await ctx.send(
-            "I have no questions loaded. Someone forgot to feed me the database."
-        )
-        return
-
-    # Store active question state for this channel
-    state = {
-        "question": q["question"],
-        "answers": q["answers"],
-        "winner_id": None,
-    }
-    ACTIVE_QUESTIONS[channel.id] = state
-
-    # Ask the question
-    await ctx.send(
-        f"❓ **Trivia Time!**\n"
-        f"{q['question']}\n\n"
-    )
-
-    # Start the hint / timeout cycle
-    asyncio.create_task(
-        handle_single_question_timeout(channel, state, channel.id)
+@bot.tree.command(
+    name="ping",
+    description="Simple test command.",
+)
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "Pong! Monji is awake... unfortunately.",
+        ephemeral=True,
     )
 
 
 # -----------------------------
-# MULTI-ROUND GAME: !trivia_start
+# MULTI-ROUND GAME: /trivia
 # -----------------------------
-@bot.command(name="trivia_start")
-async def trivia_start(ctx: commands.Context, rounds: int):
+@bot.tree.command(
+    name="trivia",
+    description="Start a multi-round trivia game in this channel.",
+)
+async def trivia(interaction: discord.Interaction, rounds: int):
     """
     Start a multi-round trivia game in this channel.
-    Usage: !trivia_start 10  (between 5 and 100 rounds)
+    Usage: /trivia rounds:10  (between 5 and 100 rounds)
     """
-    channel = ctx.channel
+    if interaction.channel is None:
+        await interaction.response.send_message(
+            "I can only run trivia in a text channel.",
+            ephemeral=True,
+        )
+        return
+
+    channel = interaction.channel
+
+    await interaction.response.defer(ephemeral=False)
 
     if rounds < 5 or rounds > 100:
-        await ctx.send(
+        await channel.send(
             "Pick a number between **5 and 100** rounds. I refuse to work outside those limits."
         )
         return
@@ -166,16 +129,8 @@ async def trivia_start(ctx: commands.Context, rounds: int):
     # Prevent starting a game if one is already running
     state = GAMES.get(channel.id)
     if state and state.get("in_progress"):
-        await ctx.send(
+        await channel.send(
             "There’s already a trivia game running in this channel. Calm down."
-        )
-        return
-
-    # Also prevent if a single-question round is in progress
-    single_state = ACTIVE_QUESTIONS.get(channel.id)
-    if single_state and single_state.get("winner_id") is None:
-        await ctx.send(
-            "There’s a single-question trivia running here. Finish that first."
         )
         return
 
@@ -190,24 +145,34 @@ async def trivia_start(ctx: commands.Context, rounds: int):
     }
     GAMES[channel.id] = state
 
-    await ctx.send(
+    await channel.send(
         f"Starting a trivia game with **{rounds} questions.**\n"
         f"Fastest correct answer wins each round. Try not to embarrass yourselves.\n\n"
     )
 
     await ask_next_round(channel, state)
 
-@bot.command(name="trivia_stop")
-async def trivia_stop(ctx: commands.Context):
+
+@bot.tree.command(
+    name="trivia_stop",
+    description="Force-stop any ongoing trivia in this channel.",
+)
+async def trivia_stop(interaction: discord.Interaction):
     """
-    Force-stop any ongoing trivia in this channel:
-    - single-question !trivia
-    - multi-round !trivia_start
+    Force-stop any ongoing trivia in this channel.
     Shows scores if stopping a multi-round game.
     """
+    if interaction.channel is None:
+        await interaction.response.send_message(
+            "I can only stop trivia in a text channel.",
+            ephemeral=True,
+        )
+        return
 
-    channel = ctx.channel
+    channel = interaction.channel
     channel_id = channel.id
+
+    await interaction.response.defer(ephemeral=False)
 
     # 1) Stop multi-round game if active
     game_state = GAMES.get(channel_id)
@@ -219,23 +184,20 @@ async def trivia_stop(ctx: commands.Context):
         # If scores exist, show scoreboard
         scores = game_state.get("scores", {})
         if scores:
-            await ctx.send("⛔ **Trivia game stopped early. Here's your scoreboard:**")
+            await channel.send("⛔ **Trivia game stopped early. Here's your scoreboard:**")
             await end_game(channel, game_state)
         else:
-            await ctx.send("⛔ **Trivia game stopped.** No scores to show.")
+            await channel.send("⛔ **Trivia game stopped.** No scores to show.")
 
         return
 
-    # 2) Stop single-question trivia if active
-    single_state = ACTIVE_QUESTIONS.get(channel_id)
-    if single_state and single_state.get("winner_id") is None:
-        ACTIVE_QUESTIONS.pop(channel_id, None)
-        await ctx.send("⛔ **Trivia question cancelled.**")
-        return
+    # 2) Nothing running
+    await channel.send("There's no trivia running here.")
 
-    # 3) Nothing running
-    await ctx.send("There's no trivia running here.")
 
+# -----------------------------
+# LEADERBOARD COMMANDS
+# -----------------------------
 @bot.tree.command(
     name="leaderboard",
     description="Show the top trivia players in this server.",
@@ -321,6 +283,9 @@ async def leaderboard_me(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
+# -----------------------------
+# MULTI-ROUND HELPERS
+# -----------------------------
 async def ask_next_round(channel: discord.TextChannel, state: dict):
     """Ask the next question in a multi-round game."""
     q = await get_random_question()
@@ -363,7 +328,6 @@ async def end_game(channel: discord.TextChannel, state: dict):
 
     lines = []
     for i, (user_id, score) in enumerate(sorted_scores, start=1):
-        # Try to resolve the member name
         guild = channel.guild
         member = guild.get_member(user_id) if guild else None
         name = member.display_name if member else f"User {user_id}"
@@ -374,7 +338,7 @@ async def end_game(channel: discord.TextChannel, state: dict):
 
 
 # -----------------------------
-# HINT / TIMEOUT HANDLERS
+# HINT / TIMEOUT HANDLER
 # -----------------------------
 async def handle_game_question_timeout(channel: discord.TextChannel, state: dict):
     """
@@ -437,70 +401,14 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
         await ask_next_round(channel, state)
 
 
-async def handle_single_question_timeout(
-    channel: discord.TextChannel,
-    state: dict,
-    channel_id: int,
-):
-    """
-    Hint cycle + timeout for a single-question !trivia.
-    Exits early if someone answers or the question is cleared.
-    """
-    original_state = state
-
-    correct_answers = state.get("answers") or []
-    if not correct_answers:
-        return
-
-    main_answer = correct_answers[0]
-
-    await asyncio.sleep(HINT_DELAY_SECONDS)
-
-    for level in range(1, 4):
-        current = ACTIVE_QUESTIONS.get(channel_id)
-        if (
-            current is None
-            or current is not original_state
-            or current.get("winner_id") is not None
-        ):
-            return
-
-        hint_text = build_hint(main_answer, level)
-        await channel.send(
-            f"💡 **Hint {level}/3:** `{hint_text}`"
-        )
-
-        if level < 3:
-            await asyncio.sleep(HINT_INTERVAL_SECONDS)
-
-    await asyncio.sleep(FINAL_WAIT_SECONDS)
-
-    current = ACTIVE_QUESTIONS.get(channel_id)
-    if (
-        current is None
-        or current is not original_state
-        or current.get("winner_id") is not None
-    ):
-        return
-
-    await channel.send(
-        "⏰ Time's up. No one got it.\n"
-        f"The correct answer was: **{main_answer}**."
-    )
-
-    # Clear the active question so another !trivia can be started
-    ACTIVE_QUESTIONS.pop(channel_id, None)
-
-
 # -----------------------------
 # MESSAGE LISTENER (CHECK ANSWERS)
 # -----------------------------
 @bot.event
 async def on_message(message: discord.Message):
     """
-    Listen to all messages so we can check if they answer:
-    - an active multi-round game question, or
-    - a single !trivia question.
+    Listen to all messages so we can check if they answer
+    an active multi-round game question.
     """
     # Ignore messages from bots (including Monji)
     if message.author.bot:
@@ -528,7 +436,7 @@ async def on_message(message: discord.Message):
                 scores = game_state["scores"]
                 scores[message.author.id] = scores.get(message.author.id, 0) + 1
 
-                # ⭐ Award 1 leaderboard point (multi-round)
+                # Award 1 leaderboard point (multi-round)
                 if message.guild is not None:
                     guild_id = message.guild.id
                     user_id = message.author.id
@@ -558,38 +466,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # 2) If no multi-round game answer, fall back to single-question mode
-    state = ACTIVE_QUESTIONS.get(channel.id)
-    if state and state.get("winner_id") is None:
-        user_answer = message.content
-        correct_answers = state["answers"]
-
-        for correct in correct_answers:
-            if is_fuzzy_match(user_answer, correct):
-                # Mark winner
-                state["winner_id"] = message.author.id
-
-                # ⭐ Award 1 leaderboard point (single-question)
-                if message.guild is not None:
-                    guild_id = message.guild.id
-                    user_id = message.author.id
-                    display_name = message.author.display_name
-
-                    points = 1
-                    await award_points(guild_id, user_id, display_name, points)
-
-                await channel.send(
-                    "✅ {mention} got it right. Correct answer: **{answer}**.".format(
-                        mention=message.author.mention,
-                        answer=correct,
-                    )
-                )
-
-                # Clear active question so another !trivia can be started
-                ACTIVE_QUESTIONS.pop(channel.id, None)
-                break
-
-    # Allow commands (!ping, !trivia, !trivia_start, etc.)
+    # Allow commands (/ping, /trivia, /trivia_stop, etc.) to still work
     await bot.process_commands(message)
 
 
