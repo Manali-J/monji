@@ -191,6 +191,45 @@ async def trivia_start(ctx: commands.Context, rounds: int):
 
     await ask_next_round(channel, state)
 
+@bot.command(name="trivia_stop")
+async def trivia_stop(ctx: commands.Context):
+    """
+    Force-stop any ongoing trivia in this channel:
+    - single-question !trivia
+    - multi-round !trivia_start
+    Shows scores if stopping a multi-round game.
+    """
+
+    channel = ctx.channel
+    channel_id = channel.id
+
+    # 1) Stop multi-round game if active
+    game_state = GAMES.get(channel_id)
+    if game_state and game_state.get("in_progress"):
+        game_state["in_progress"] = False
+        game_state["current_question"] = None
+        game_state["winner_id"] = None
+
+        # If scores exist, show scoreboard
+        scores = game_state.get("scores", {})
+        if scores:
+            await ctx.send("⛔ **Trivia game stopped early. Here's your scoreboard:**")
+            await end_game(channel, game_state)
+        else:
+            await ctx.send("⛔ **Trivia game stopped.** No scores to show.")
+
+        return
+
+    # 2) Stop single-question trivia if active
+    single_state = ACTIVE_QUESTIONS.get(channel_id)
+    if single_state and single_state.get("winner_id") is None:
+        ACTIVE_QUESTIONS.pop(channel_id, None)
+        await ctx.send("⛔ **Trivia question cancelled.**")
+        return
+
+    # 3) Nothing running
+    await ctx.send("There's no trivia running here.")
+
 
 async def ask_next_round(channel: discord.TextChannel, state: dict):
     """Ask the next question in a multi-round game."""
