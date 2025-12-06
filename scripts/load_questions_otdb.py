@@ -9,7 +9,7 @@ import aiohttp
 from monji_bot.db import get_pool, init_schema
 
 API_URL = (
-    "https://opentdb.com/api.php?amount=50&category=10&type=multiple"
+    "https://opentdb.com/api.php?amount=50&category=31&difficulty=easy&type=multiple"
 )
 
 MAX_EMPTY_INSERTS = 5  # stop after 5 batches with no new unique items
