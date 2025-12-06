@@ -131,7 +131,6 @@ async def trivia_command(ctx: commands.Context):
     await ctx.send(
         f"❓ **Trivia Time!**\n"
         f"{q['question']}\n\n"
-        f"Type your answer in chat. First correct one wins. No pressure."
     )
 
     # Start the hint / timeout cycle
