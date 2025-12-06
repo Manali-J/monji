@@ -185,8 +185,8 @@ async def trivia_start(ctx: commands.Context, rounds: int):
     GAMES[channel.id] = state
 
     await ctx.send(
-        f"Starting a trivia game with **{rounds} rounds.**\n"
-        f"Fastest correct answer wins each round. Try not to embarrass yourselves."
+        f"Starting a trivia game with **{rounds} questions.**\n"
+        f"Fastest correct answer wins each round. Try not to embarrass yourselves.\n\n"
     )
 
     await ask_next_round(channel, state)
@@ -210,7 +210,6 @@ async def ask_next_round(channel: discord.TextChannel, state: dict):
     await channel.send(
         f"❓ **Question {state['round']} of {state['max_rounds']}**\n"
         f"{q['question']}\n\n"
-        f"Type your answer. First correct one wins. No pressure."
     )
 
     # Start the hint / timeout cycle for this round
