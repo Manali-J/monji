@@ -4,7 +4,6 @@ import asyncio
 import discord
 from discord.ext import commands
 
-from .snark import get_snark
 from .config import BOT_TOKEN
 from .trivia.manager import get_random_question
 from .db import init_schema
@@ -41,7 +40,6 @@ GAMES: dict[int, dict] = {}
 HINT_DELAY_SECONDS = 30       # time before first hint
 HINT_INTERVAL_SECONDS = 24    # time between hints
 FINAL_WAIT_SECONDS = 20       # time after last hint before giving up
-
 
 def build_hint(answer: str, level: int) -> str:
     """
@@ -100,13 +98,17 @@ async def trivia_command(ctx: commands.Context):
     # If there's already an active multi-round game, don’t allow single-question mode.
     game_state = GAMES.get(channel.id)
     if game_state and game_state.get("in_progress"):
-        await ctx.send(get_snark("game_already_running"))
+        await ctx.send(
+            "There’s already a trivia game running here. Finish that first, overachiever."
+        )
         return
 
     # If there's already an active single question with no winner, don't start another
     state = ACTIVE_QUESTIONS.get(channel.id)
     if state and state.get("winner_id") is None:
-        await ctx.send(get_snark("single_already_running"))
+        await ctx.send(
+            "There’s already a question running here. Try answering that one first."
+        )
         return
 
     # Get a random question
@@ -158,13 +160,17 @@ async def trivia_start(ctx: commands.Context, rounds: int):
     # Prevent starting a game if one is already running
     state = GAMES.get(channel.id)
     if state and state.get("in_progress"):
-        await ctx.send(get_snark("game_already_running"))
+        await ctx.send(
+            "There’s already a trivia game running in this channel. Calm down."
+        )
         return
 
     # Also prevent if a single-question round is in progress
     single_state = ACTIVE_QUESTIONS.get(channel.id)
     if single_state and single_state.get("winner_id") is None:
-        await ctx.send(get_snark("single_already_running"))
+        await ctx.send(
+            "There’s a single-question trivia running here. Finish that first."
+        )
         return
 
     # Create new game state
@@ -185,7 +191,6 @@ async def trivia_start(ctx: commands.Context, rounds: int):
 
     await ask_next_round(channel, state)
 
-
 @bot.command(name="trivia_stop")
 async def trivia_stop(ctx: commands.Context):
     """
@@ -194,6 +199,7 @@ async def trivia_stop(ctx: commands.Context):
     - multi-round !trivia_start
     Shows scores if stopping a multi-round game.
     """
+
     channel = ctx.channel
     channel_id = channel.id
 
@@ -222,7 +228,7 @@ async def trivia_stop(ctx: commands.Context):
         return
 
     # 3) Nothing running
-    await ctx.send(get_snark("nothing_to_stop"))
+    await ctx.send("There's no trivia running here.")
 
 
 async def ask_next_round(channel: discord.TextChannel, state: dict):
@@ -311,8 +317,7 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
 
         hint_text = build_hint(main_answer, level)
         await channel.send(
-            f"💡 **Hint {level}/3:** `{hint_text}`\n"
-            f"{get_snark(f'hint_{level}')}"
+            f"💡 **Hint {level}/3:** `{hint_text}`"
         )
 
         if level < 3:
@@ -329,8 +334,8 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
         return
 
     await channel.send(
-        f"⏰ {get_snark('nobody_got_it')}\n"
-        f"Correct answer: **{main_answer}**."
+        "⏰ Time's up. No one got it.\n"
+        f"The correct answer was: **{main_answer}**."
     )
 
     # Move on to next round or end game
@@ -372,8 +377,7 @@ async def handle_single_question_timeout(
 
         hint_text = build_hint(main_answer, level)
         await channel.send(
-            f"💡 **Hint {level}/3:** `{hint_text}`\n"
-            f"{get_snark(f'hint_{level}')}"
+            f"💡 **Hint {level}/3:** `{hint_text}`"
         )
 
         if level < 3:
@@ -390,8 +394,8 @@ async def handle_single_question_timeout(
         return
 
     await channel.send(
-        f"⏰ {get_snark('nobody_got_it')}\n"
-        f"Correct answer: **{main_answer}**."
+        "⏰ Time's up. No one got it.\n"
+        f"The correct answer was: **{main_answer}**."
     )
 
     # Clear the active question so another !trivia can be started
@@ -435,8 +439,10 @@ async def on_message(message: discord.Message):
                 scores[message.author.id] = scores.get(message.author.id, 0) + 1
 
                 await channel.send(
-                    f"✅ {message.author.mention} got it right — {get_snark('correct_answer')}\n"
-                    f"Correct answer: **{correct}**."
+                    "✅ {mention} got it right. Correct answer: **{answer}**.".format(
+                        mention=message.author.mention,
+                        answer=correct,
+                    )
                 )
 
                 # Next round or end game
@@ -465,8 +471,10 @@ async def on_message(message: discord.Message):
                 state["winner_id"] = message.author.id
 
                 await channel.send(
-                    f"✅ {message.author.mention} got it right — {get_snark('correct_answer')}\n"
-                    f"Correct answer: **{correct}**."
+                    "✅ {mention} got it right. Correct answer: **{answer}**.".format(
+                        mention=message.author.mention,
+                        answer=correct,
+                    )
                 )
 
                 # Clear active question so another !trivia can be started
