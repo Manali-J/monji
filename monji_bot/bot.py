@@ -400,8 +400,7 @@ async def on_message(message: discord.Message):
                 scores[message.author.id] = scores.get(message.author.id, 0) + 1
 
                 await channel.send(
-                    "✅ {mention} got it right. I’ll pretend I’m not impressed.\n"
-                    "Correct answer: **{answer}**.".format(
+                    "✅ {mention} got it right. Correct answer: **{answer}**.".format(
                         mention=message.author.mention,
                         answer=correct,
                     )
@@ -433,8 +432,7 @@ async def on_message(message: discord.Message):
                 state["winner_id"] = message.author.id
 
                 await channel.send(
-                    "✅ {mention} got it right. I’ll pretend I’m not impressed.\n"
-                    "Correct answer: **{answer}**.".format(
+                    "✅ {mention} got it right. Correct answer: **{answer}**.".format(
                         mention=message.author.mention,
                         answer=correct,
                     )
