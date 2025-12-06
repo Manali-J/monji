@@ -147,13 +147,13 @@ async def trivia_command(ctx: commands.Context):
 async def trivia_start(ctx: commands.Context, rounds: int):
     """
     Start a multi-round trivia game in this channel.
-    Usage: !trivia_start 10  (between 5 and 1000 rounds)
+    Usage: !trivia_start 10  (between 5 and 100 rounds)
     """
     channel = ctx.channel
 
-    if rounds < 5 or rounds > 1000:
+    if rounds < 5 or rounds > 100:
         await ctx.send(
-            "Pick a number between **5 and 1000** rounds. I refuse to work outside those limits."
+            "Pick a number between **5 and 100** rounds. I refuse to work outside those limits."
         )
         return
 
