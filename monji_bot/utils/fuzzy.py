@@ -39,6 +39,8 @@ def is_fuzzy_match(user_answer: str, correct_answer: str, threshold: float = 0.8
 
     # Split into tokens
     ua_tokens = ua.split()
+    ca_tokens = ca.split()
+    multi_word_correct = len(ca_tokens) > 1
 
     # If the user answer is only stopwords (e.g. "the", "of the"), auto-fail
     if all(token in STOPWORDS for token in ua_tokens):
@@ -48,11 +50,15 @@ def is_fuzzy_match(user_answer: str, correct_answer: str, threshold: float = 0.8
     if ua == ca:
         return True
 
-    # Substring match for short-ish answers (“new york” vs “new york city”)
-    # Still allowed, but won't trigger for pure stopwords because we already returned False above.
-    if len(ua) >= 3 and (ua in ca or ca in ua):
-        return True
+    # Substring match:
+    # - For single-word correct answers, allow normal substring matching.
+    # - For multi-word correct answers, only allow if the user also gave at least 2 words.
+    if len(ua) >= 3:
+        if not multi_word_correct and (ua in ca or ca in ua):
+            return True
+        if multi_word_correct and len(ua_tokens) >= 2 and (ua in ca or ca in ua):
+            return True
 
-    # Fuzzy ratio
+    # Fuzzy ratio on the full strings
     ratio = SequenceMatcher(None, ua, ca).ratio()
     return ratio >= threshold
