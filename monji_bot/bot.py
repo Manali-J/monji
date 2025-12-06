@@ -118,19 +118,20 @@ async def trivia(interaction: discord.Interaction, rounds: int):
 
     channel = interaction.channel
 
-    await interaction.response.defer(ephemeral=False)
-
+    # Validate rounds
     if rounds < 5 or rounds > 100:
-        await channel.send(
-            "Pick a number between **5 and 100** rounds. I refuse to work outside those limits."
+        await interaction.response.send_message(
+            "Pick a number between **5 and 100** rounds. I refuse to work outside those limits.",
+            ephemeral=True,
         )
         return
 
     # Prevent starting a game if one is already running
     state = GAMES.get(channel.id)
     if state and state.get("in_progress"):
-        await channel.send(
-            "There’s already a trivia game running in this channel. Calm down."
+        await interaction.response.send_message(
+            "There’s already a trivia game running in this channel. Calm down.",
+            ephemeral=True,
         )
         return
 
@@ -145,11 +146,13 @@ async def trivia(interaction: discord.Interaction, rounds: int):
     }
     GAMES[channel.id] = state
 
-    await channel.send(
+    # Respond to the interaction so Discord stops showing "thinking"
+    await interaction.response.send_message(
         f"Starting a trivia game with **{rounds} questions.**\n"
         f"Fastest correct answer wins each round. Try not to embarrass yourselves.\n\n"
     )
 
+    # Ask the first question as normal channel messages
     await ask_next_round(channel, state)
 
 
@@ -172,8 +175,6 @@ async def trivia_stop(interaction: discord.Interaction):
     channel = interaction.channel
     channel_id = channel.id
 
-    await interaction.response.defer(ephemeral=False)
-
     # 1) Stop multi-round game if active
     game_state = GAMES.get(channel_id)
     if game_state and game_state.get("in_progress"):
@@ -181,18 +182,24 @@ async def trivia_stop(interaction: discord.Interaction):
         game_state["current_question"] = None
         game_state["winner_id"] = None
 
-        # If scores exist, show scoreboard
         scores = game_state.get("scores", {})
+
         if scores:
-            await channel.send("⛔ **Trivia game stopped early. Here's your scoreboard:**")
+            # respond to the slash command
+            await interaction.response.send_message(
+                "⛔ **Trivia game stopped early. Here's your scoreboard:**"
+            )
+            # scoreboard goes as a normal channel message
             await end_game(channel, game_state)
         else:
-            await channel.send("⛔ **Trivia game stopped.** No scores to show.")
+            await interaction.response.send_message(
+                "⛔ **Trivia game stopped.** No scores to show."
+            )
 
         return
 
     # 2) Nothing running
-    await channel.send("There's no trivia running here.")
+    await interaction.response.send_message("There's no trivia running here.")
 
 
 # -----------------------------
