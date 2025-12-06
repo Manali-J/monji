@@ -208,7 +208,7 @@ async def ask_next_round(channel: discord.TextChannel, state: dict):
     state["winner_id"] = None
 
     await channel.send(
-        f"❓ **Round {state['round']} of {state['max_rounds']}**\n"
+        f"❓ **Question {state['round']} of {state['max_rounds']}**\n"
         f"{q['question']}\n\n"
         f"Type your answer. First correct one wins. No pressure."
     )
