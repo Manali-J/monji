@@ -13,6 +13,7 @@ DB_NAME = os.getenv("DB_NAME")
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 DB_ENABLE_SSL =os.getenv("DB_ENABLE_SSL")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing. Add it to .env or environment variables.")

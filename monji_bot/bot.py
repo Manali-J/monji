@@ -6,7 +6,7 @@ from discord.ext import commands
 
 from .config import BOT_TOKEN
 from .trivia.manager import get_random_question
-from .db import init_schema
+from .db import init_schema, award_points, get_leaderboard, get_user_rank
 from .utils.fuzzy import is_fuzzy_match
 
 intents = discord.Intents.default()
@@ -73,10 +73,17 @@ def build_hint(answer: str, level: int) -> str:
 
 @bot.event
 async def on_ready():
-    # Ensure DB table exists (idempotent)
-    await init_schema()
-    print(f"Monji is online as {bot.user}")
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
+    # Make sure DB schema (questions + user_scores) exists
+    await init_schema()
+
+    # 🔥 Sync slash commands with Discord
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Synced {len(synced)} app commands.")
+    except Exception as e:
+        print(f"❌ Error syncing app commands: {e}")
 
 @bot.command()
 async def ping(ctx: commands.Context):
@@ -228,6 +235,90 @@ async def trivia_stop(ctx: commands.Context):
 
     # 3) Nothing running
     await ctx.send("There's no trivia running here.")
+
+@bot.tree.command(
+    name="leaderboard",
+    description="Show the top trivia players in this server.",
+)
+async def leaderboard(interaction: discord.Interaction):
+    # Only works in servers
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "This command can only be used in a server.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=False)
+
+    guild_id = interaction.guild.id
+    rows = await get_leaderboard(guild_id, limit=10)
+
+    if not rows:
+        await interaction.followup.send(
+            "No one is on the leaderboard yet. Answer a question to claim the top spot!"
+        )
+        return
+
+    lines = []
+    for idx, row in enumerate(rows, start=1):
+        user_id = row["user_id"]
+        display_name = row["display_name"] or f"<@{user_id}>"
+        score_total = row["score_total"]
+
+        # Try to resolve current nickname/display name
+        member = interaction.guild.get_member(user_id)
+        if member is not None:
+            display_name = member.display_name
+
+        lines.append(f"**#{idx}** — {display_name} — {score_total} pts")
+
+    embed = discord.Embed(
+        title="🏆 Monji Leaderboard",
+        description="\n".join(lines),
+    )
+    embed.set_footer(text=f"Server: {interaction.guild.name}")
+
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(
+    name="leaderboard_me",
+    description="Show your rank and score in this server.",
+)
+async def leaderboard_me(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "This command can only be used in a server.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    guild_id = interaction.guild.id
+    user_id = interaction.user.id
+
+    result = await get_user_rank(guild_id, user_id)
+    if result is None:
+        await interaction.followup.send(
+            "You're not on the leaderboard yet. Answer a question to earn your first points!"
+        )
+        return
+
+    rank, score_total = result
+    display_name = interaction.user.display_name
+
+    embed = discord.Embed(
+        title="📊 Your Monji Rank",
+        description=(
+            f"{display_name}, you are **#{rank}** in this server "
+            f"with **{score_total}** points."
+        ),
+    )
+    embed.set_footer(text=f"Server: {interaction.guild.name}")
+
+    await interaction.followup.send(embed=embed)
 
 
 async def ask_next_round(channel: discord.TextChannel, state: dict):
@@ -433,9 +524,18 @@ async def on_message(message: discord.Message):
                 # Mark winner
                 game_state["winner_id"] = message.author.id
 
-                # Update score
+                # Update in-memory game score
                 scores = game_state["scores"]
                 scores[message.author.id] = scores.get(message.author.id, 0) + 1
+
+                # ⭐ Award 1 leaderboard point (multi-round)
+                if message.guild is not None:
+                    guild_id = message.guild.id
+                    user_id = message.author.id
+                    display_name = message.author.display_name
+
+                    points = 1
+                    await award_points(guild_id, user_id, display_name, points)
 
                 await channel.send(
                     "✅ {mention} got it right. Correct answer: **{answer}**.".format(
@@ -468,6 +568,15 @@ async def on_message(message: discord.Message):
             if is_fuzzy_match(user_answer, correct):
                 # Mark winner
                 state["winner_id"] = message.author.id
+
+                # ⭐ Award 1 leaderboard point (single-question)
+                if message.guild is not None:
+                    guild_id = message.guild.id
+                    user_id = message.author.id
+                    display_name = message.author.display_name
+
+                    points = 1
+                    await award_points(guild_id, user_id, display_name, points)
 
                 await channel.send(
                     "✅ {mention} got it right. Correct answer: **{answer}**.".format(
