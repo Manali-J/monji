@@ -4,6 +4,7 @@ import asyncio
 import discord
 from discord.ext import commands
 
+from monji_bot.llm_bot import generate_reply
 from .config import BOT_TOKEN
 from .trivia.manager import get_random_question
 from .db import init_schema, award_points, get_leaderboard, get_user_rank
@@ -29,6 +30,12 @@ bot = commands.Bot(
 #   "in_progress": bool
 # }
 GAMES: dict[int, dict] = {}
+
+EVENT_MENTION = "mention"
+EVENT_HINT_3 = "hint_3"
+EVENT_NO_ANSWER = "no_answer"
+KEY_TEXT = "text"
+KEY_HINT = "hint"
 
 # -----------------------------
 # HINT / TIMEOUT CONFIG
@@ -372,6 +379,7 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
 
     # Hints 1–3
     for level in range(1, 4):
+        # Bail if game ended / winner chosen / round changed
         if (
             not state.get("in_progress")
             or state.get("winner_id") is not None
@@ -381,12 +389,46 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
 
         if not single_char_answer:
             hint_text = build_hint(main_answer, level)
-            await channel.send(
-                f"💡 **Hint {level}/3:** `{hint_text}`"
-            )
+
+            if level < 3:
+                # Hint 1 & 2: plain, no LLM
+                await channel.send(
+                    f"💡 **Hint {level}/3:** `{hint_text}`"
+                )
+            else:
+                # Hint 3: hint + short sarcastic one-liner from Monji
+                data = {
+                    "hint": hint_text,
+                    "answer": main_answer,
+                    "round": this_round,
+                    "max_rounds": state.get("max_rounds"),
+                    "question": q.get("question"),
+                }
+
+                sarcasm = await asyncio.to_thread(
+                    generate_reply,
+                    "hint_3",
+                    data,
+                )
+
+                # Safety: if LLM leaks answer or goes overboard, clamp it
+                if sarcasm:
+                    if main_answer.lower() in sarcasm.lower():
+                        sarcasm = "Wow, third hint already? Rough one."
+                    if len(sarcasm) > 200:
+                        sarcasm = sarcasm[:200]
+
+                    await channel.send(
+                        f"💡 **Hint 3/3:** `{hint_text}`\n> {sarcasm}"
+                    )
+                else:
+                    # Fallback: just show the hint
+                    await channel.send(
+                        f"💡 **Hint 3/3:** `{hint_text}`"
+                    )
         else:
-            #send a message that answer is a single-character
-            hint_text = 'No hints! Answer is a single character.'
+            # Single-character answer: same simple hint all 3 times, no LLM
+            hint_text = "No hints! Answer is a single character."
             await channel.send(
                 f"💡 **Hint {level}/3:** `{hint_text}`"
             )
@@ -404,10 +446,36 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
     ):
         return
 
-    await channel.send(
-        "⏰ Time's up. No one got it.\n"
-        f"The correct answer was: **{main_answer}**."
+    # Time's up and nobody got it -> base message + short sarcastic comment
+    data = {
+        "answer": main_answer,
+        "round": this_round,
+        "max_rounds": state.get("max_rounds"),
+        "question": q.get("question"),
+    }
+
+    sarcasm = await asyncio.to_thread(
+        generate_reply,
+        "no_answer",
+        data,
     )
+
+    if sarcasm:
+        if len(sarcasm) > 200:
+            sarcasm = sarcasm[:200]
+        msg = (
+            "⏰ Time's up. No one got it.\n"
+            f"The correct answer was: **{main_answer}**.\n"
+            f"> {sarcasm}"
+        )
+    else:
+        # Fallback if LLM fails
+        msg = (
+            "⏰ Time's up. No one got it.\n"
+            f"The correct answer was: **{main_answer}**."
+        )
+
+    await channel.send(msg)
 
     # Move on to next round or end game
     if state["round"] >= state["max_rounds"]:
@@ -418,6 +486,7 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
         await ask_next_round(channel, state)
 
 
+
 # -----------------------------
 # MESSAGE LISTENER (CHECK ANSWERS)
 # -----------------------------
@@ -425,7 +494,8 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
 async def on_message(message: discord.Message):
     """
     Listen to all messages so we can check if they answer
-    an active multi-round game question.
+    an active multi-round game question, and also make Monji
+    respond when mentioned.
     """
     # Ignore messages from bots (including Monji)
     if message.author.bot:
@@ -480,8 +550,27 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # Allow commands (/ping, /trivia, /trivia_stop, etc.) to still work
+    # 2) If Monji is mentioned, trigger the LLM reply
+    #    (this runs only when there's NO active question waiting)
+    if bot.user and bot.user.mentioned_in(message):
+        # Remove the bot mention from the message content
+        content = message.content
+        for mention in message.mentions:
+            if mention == bot.user:
+                content = content.replace(mention.mention, "").strip()
+
+        # If they only pinged Monji with no text, give LLM some context
+        if not content:
+            content = "User mentioned you without saying anything. Respond sarcastically."
+
+        # generate_reply is sync, so run it in a thread to not block the event loop
+        reply = await asyncio.to_thread(generate_reply, EVENT_MENTION, {KEY_TEXT: content})
+        await channel.send(reply)
+        return
+
+    # 3) Allow commands (/ping, /trivia, /trivia_stop, etc.) to still work
     await bot.process_commands(message)
+
 
 
 def main():
