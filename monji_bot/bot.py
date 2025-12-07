@@ -384,6 +384,12 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
             await channel.send(
                 f"💡 **Hint {level}/3:** `{hint_text}`"
             )
+        else:
+            #send a message that answer is a single-character
+            hint_text = 'No hints! Answer is a single character.'
+            await channel.send(
+                f"💡 **Hint {level}/3:** `{hint_text}`"
+            )
 
         if level < 3:
             await asyncio.sleep(HINT_INTERVAL_SECONDS)

@@ -61,16 +61,36 @@ def is_fuzzy_match(user_answer: str, correct_answer: str, threshold: float = 0.8
     if ua == ca:
         return True
 
+    # Special handling for single-word correct answers
+    if not multi_word_correct:
+        # Very short answers (<= 4 letters), e.g. "Mali", "Lao", "Peru"
+        # Too sensitive to fuzzy noise, so:
+        #  - require same starting letter
+        #  - and a stricter similarity threshold (0.9)
+        if len(ca) <= 4:
+            if ua[0] != ca[0]:
+                return False
+
+            ratio = SequenceMatcher(None, ua, ca).ratio()
+            return ratio >= 0.9
+
+        # Longer single-word answers (e.g. "Paris", "London", "Everest"):
+        # - length difference must be small (to reject "xparisx")
+        # - first OR last letter must match
+        if abs(len(ua) - len(ca)) > 2:
+            return False
+
+        if ua[0] != ca[0] and ua[-1] != ca[-1]:
+            return False
+
     # Substring match:
-    # - For single-word correct answers, allow normal substring matching.
-    # - For multi-word correct answers, only allow if the user also gave at least 2 words.
-    if len(ua) >= 3:
-        if not multi_word_correct and (ua in ca or ca in ua):
-            return True
-        if multi_word_correct and len(ua_tokens) >= 2 and (ua in ca or ca in ua):
+    # ⛔ Disabled for single-word answers to avoid cases like "Somalia" matching "Mali".
+    # ✅ Allowed only for multi-word correct answers AND multi-word user answers.
+    if multi_word_correct and len(ua) >= 3 and len(ua_tokens) >= 2:
+        if ua in ca or ca in ua:
             return True
 
-    # Fuzzy ratio on the full strings
+    # General fuzzy ratio on the full strings
     ratio = SequenceMatcher(None, ua, ca).ratio()
     return ratio >= threshold
 
