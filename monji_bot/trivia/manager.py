@@ -10,15 +10,8 @@ Question = Dict[str, Any]
 
 async def get_random_question() -> Optional[Question]:
     """
-    Fetch a single random question from the database.
-
-    Expects table:
-        questions(
-            id SERIAL PRIMARY KEY,
-            question TEXT NOT NULL,
-            correct_answers JSONB NOT NULL,  -- list
-            ...
-        )
+    Fetch a single random approved question from the DB,
+    increment its times_asked counter, and return it.
 
     Returns a dict:
         {
@@ -26,28 +19,38 @@ async def get_random_question() -> Optional[Question]:
           "question": str,
           "answers": [str, ...]
         }
-    or None if there are no questions.
     """
     pool = await get_pool()
 
     async with pool.acquire() as conn:
+
+        # 1. Pick a question, prefer ones asked less often
         row = await conn.fetchrow(
             """
             SELECT id, question, correct_answers
             FROM questions
             WHERE approved = TRUE
-            ORDER BY RANDOM()
+            ORDER BY times_asked ASC, RANDOM()
             LIMIT 1
             """
         )
 
-    if not row:
-        return None
+        if not row:
+            return None
 
+        # 2. Increment times_asked for this question
+        await conn.execute(
+            """
+            UPDATE questions
+            SET times_asked = times_asked + 1
+            WHERE id = $1
+            """,
+            row["id"],
+        )
+
+    # 3. Decode answers
     answers_raw = row["correct_answers"]
 
-    # correct_answers is stored as JSONB, but we encoded it via json.dumps
-    # so asyncpg will likely give us a string -> need json.loads.
     if isinstance(answers_raw, str):
         try:
             answers_list = json.loads(answers_raw)

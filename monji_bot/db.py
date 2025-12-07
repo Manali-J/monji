@@ -44,7 +44,8 @@ async def init_schema() -> None:
                 correct_answers JSON,
                 incorrect_answers JSON,
                 approved BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT NOW(),
+                times_asked INTEGER DEFAULT 0
             );
             """
         )
