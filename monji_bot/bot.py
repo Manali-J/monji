@@ -7,7 +7,7 @@ from discord.ext import commands
 from .config import BOT_TOKEN
 from .trivia.manager import get_random_question
 from .db import init_schema, award_points, get_leaderboard, get_user_rank
-from .utils.fuzzy import is_fuzzy_match
+from .utils.fuzzy import is_correct_answer
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -364,6 +364,9 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
 
     main_answer = correct_answers[0]
 
+    # Disable hints if ANY correct answer is a single character (letter or number)
+    single_char_answer = any(len(a.strip()) == 1 for a in correct_answers)
+
     # Initial wait before first hint
     await asyncio.sleep(HINT_DELAY_SECONDS)
 
@@ -376,10 +379,11 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
         ):
             return
 
-        hint_text = build_hint(main_answer, level)
-        await channel.send(
-            f"💡 **Hint {level}/3:** `{hint_text}`"
-        )
+        if not single_char_answer:
+            hint_text = build_hint(main_answer, level)
+            await channel.send(
+                f"💡 **Hint {level}/3:** `{hint_text}`"
+            )
 
         if level < 3:
             await asyncio.sleep(HINT_INTERVAL_SECONDS)
@@ -434,40 +438,37 @@ async def on_message(message: discord.Message):
         user_answer = message.content
         correct_answers = game_state["current_question"]["answers"]
 
-        for correct in correct_answers:
-            if is_fuzzy_match(user_answer, correct):
-                # Mark winner
-                game_state["winner_id"] = message.author.id
+        if is_correct_answer(user_answer, correct_answers):
+            # Mark winner
+            game_state["winner_id"] = message.author.id
 
-                # Update in-memory game score
-                scores = game_state["scores"]
-                scores[message.author.id] = scores.get(message.author.id, 0) + 1
+            # Update in-memory game score
+            scores = game_state["scores"]
+            scores[message.author.id] = scores.get(message.author.id, 0) + 1
 
-                # Award 1 leaderboard point (multi-round)
-                if message.guild is not None:
-                    guild_id = message.guild.id
-                    user_id = message.author.id
-                    display_name = message.author.display_name
+            # Award 1 leaderboard point (multi-round)
+            if message.guild is not None:
+                guild_id = message.guild.id
+                user_id = message.author.id
+                display_name = message.author.display_name
 
-                    points = 1
-                    await award_points(guild_id, user_id, display_name, points)
+                points = 1
+                await award_points(guild_id, user_id, display_name, points)
 
-                await channel.send(
-                    "✅ {mention} got it right. Correct answer: **{answer}**.".format(
-                        mention=message.author.mention,
-                        answer=correct,
-                    )
+            await channel.send(
+                "✅ {mention} got it right. Correct answer: **{answer}**.".format(
+                    mention=message.author.mention,
+                    answer=correct_answers[0],
                 )
+            )
 
-                # Next round or end game
-                if game_state["round"] >= game_state["max_rounds"]:
-                    await asyncio.sleep(2)
-                    await end_game(channel, game_state)
-                else:
-                    await asyncio.sleep(2)
-                    await ask_next_round(channel, game_state)
-
-                break  # stop checking more answers
+            # Next round or end game
+            if game_state["round"] >= game_state["max_rounds"]:
+                await asyncio.sleep(2)
+                await end_game(channel, game_state)
+            else:
+                await asyncio.sleep(2)
+                await ask_next_round(channel, game_state)
 
         # Important: still process commands even during a game
         await bot.process_commands(message)
