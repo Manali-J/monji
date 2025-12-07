@@ -27,7 +27,8 @@ bot = commands.Bot(
 #   "current_question": { "question": str, "answers": [str] } | None,
 #   "winner_id": int | None,
 #   "scores": dict[user_id, int],
-#   "in_progress": bool
+#   "in_progress": bool,
+#   "correct_candidates": list[{"message": discord.Message}]
 # }
 GAMES: dict[int, dict] = {}
 
@@ -42,7 +43,9 @@ KEY_HINT = "hint"
 # -----------------------------
 HINT_DELAY_SECONDS = 30       # time before first hint
 HINT_INTERVAL_SECONDS = 24    # time between hints
-FINAL_WAIT_SECONDS = 20       # time after last hint before giving up
+FINAL_WAIT_SECONDS = 15       # time after last hint before giving up
+
+WINNER_RESOLUTION_DELAY = 1  # seconds to wait for near-simultaneous answers
 
 
 def build_hint(answer: str, level: int) -> str:
@@ -150,6 +153,8 @@ async def trivia(interaction: discord.Interaction, rounds: int):
         "winner_id": None,
         "scores": {},  # user_id -> int
         "in_progress": True,
+        "correct_candidates": [],
+        "resolving": False
     }
     GAMES[channel.id] = state
 
@@ -188,6 +193,8 @@ async def trivia_stop(interaction: discord.Interaction):
         game_state["in_progress"] = False
         game_state["current_question"] = None
         game_state["winner_id"] = None
+        game_state["correct_candidates"] = []
+        game_state["resolving"] = False
 
         scores = game_state.get("scores", {})
 
@@ -314,6 +321,7 @@ async def ask_next_round(channel: discord.TextChannel, state: dict):
     state["round"] += 1
     state["current_question"] = q
     state["winner_id"] = None
+    state["correct_candidates"] = []
 
     await channel.send(
         f"❓ **Question {state['round']} of {state['max_rounds']}**\n"
@@ -328,6 +336,8 @@ async def end_game(channel: discord.TextChannel, state: dict):
     """End the multi-round game and show the scoreboard."""
     state["in_progress"] = False
     state["current_question"] = None
+    state["correct_candidates"] = []
+    state["resolving"] = False
 
     scores = state.get("scores", {})
 
@@ -398,7 +408,7 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
             else:
                 # Hint 3: hint + short sarcastic one-liner from Monji
                 data = {
-                    "hint": hint_text,
+                    KEY_HINT: hint_text,
                     "answer": main_answer,
                     "round": this_round,
                     "max_rounds": state.get("max_rounds"),
@@ -407,7 +417,7 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
 
                 sarcasm = await asyncio.to_thread(
                     generate_reply,
-                    "hint_3",
+                    EVENT_HINT_3,
                     data,
                 )
 
@@ -439,12 +449,20 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
     # Final wait before giving up
     await asyncio.sleep(FINAL_WAIT_SECONDS)
 
+    # If a winner-resolution is in progress, wait for it to finish
+    if state.get("resolving"):
+        await asyncio.sleep(WINNER_RESOLUTION_DELAY + 0.1)
+
     if (
         not state.get("in_progress")
         or state.get("winner_id") is not None
         or state.get("round") != this_round
     ):
         return
+
+    # 🔒 Lock this round: time's up = no winner
+    state["winner_id"] = -1  # sentinel meaning "no winner"
+    state["correct_candidates"] = []
 
     # Time's up and nobody got it -> base message + short sarcastic comment
     data = {
@@ -456,7 +474,7 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
 
     sarcasm = await asyncio.to_thread(
         generate_reply,
-        "no_answer",
+        EVENT_NO_ANSWER,
         data,
     )
 
@@ -486,7 +504,6 @@ async def handle_game_question_timeout(channel: discord.TextChannel, state: dict
         await ask_next_round(channel, state)
 
 
-
 # -----------------------------
 # MESSAGE LISTENER (CHECK ANSWERS)
 # -----------------------------
@@ -509,42 +526,20 @@ async def on_message(message: discord.Message):
         game_state
         and game_state.get("in_progress")
         and game_state.get("current_question")
-        and game_state.get("winner_id") is None
     ):
         user_answer = message.content
         correct_answers = game_state["current_question"]["answers"]
 
         if is_correct_answer(user_answer, correct_answers):
-            # Mark winner
-            game_state["winner_id"] = message.author.id
+            # Collect all correct answers for this round, resolve after a short delay
+            candidates = game_state.setdefault("correct_candidates", [])
+            candidates.append({"message": message})
 
-            # Update in-memory game score
-            scores = game_state["scores"]
-            scores[message.author.id] = scores.get(message.author.id, 0) + 1
-
-            # Award 1 leaderboard point (multi-round)
-            if message.guild is not None:
-                guild_id = message.guild.id
-                user_id = message.author.id
-                display_name = message.author.display_name
-
-                points = 1
-                await award_points(guild_id, user_id, display_name, points)
-
-            await channel.send(
-                "✅ {mention} got it right. Correct answer: **{answer}**.".format(
-                    mention=message.author.mention,
-                    answer=correct_answers[0],
-                )
-            )
-
-            # Next round or end game
-            if game_state["round"] >= game_state["max_rounds"]:
-                await asyncio.sleep(2)
-                await end_game(channel, game_state)
-            else:
-                await asyncio.sleep(2)
-                await ask_next_round(channel, game_state)
+            # If this is the first correct answer we saw, schedule resolution
+            if len(candidates) == 1 and game_state.get("winner_id") is None:
+                this_round = game_state.get("round")
+                game_state["resolving"] = True  # 👈 we're about to resolve
+                asyncio.create_task(resolve_round_winner(channel, game_state, this_round))
 
         # Important: still process commands even during a game
         await bot.process_commands(message)
@@ -565,12 +560,90 @@ async def on_message(message: discord.Message):
 
         # generate_reply is sync, so run it in a thread to not block the event loop
         reply = await asyncio.to_thread(generate_reply, EVENT_MENTION, {KEY_TEXT: content})
-        await channel.send(reply)
+        if reply:
+            await channel.send(reply)
         return
 
     # 3) Allow commands (/ping, /trivia, /trivia_stop, etc.) to still work
     await bot.process_commands(message)
 
+
+async def resolve_round_winner(
+    channel: discord.TextChannel,
+    game_state: dict,
+    round_number: int,
+):
+    """
+    After a short delay, pick the earliest correct answer (by message.created_at)
+    among all correct answers received for this round, then award the point
+    and move to the next round / end the game.
+    """
+    await asyncio.sleep(WINNER_RESOLUTION_DELAY)
+
+    # If game ended or round changed in the meantime, bail out
+    if (
+        not game_state.get("in_progress")
+        or game_state.get("current_question") is None
+        or game_state.get("winner_id") is not None
+        or game_state.get("round") != round_number
+    ):
+        return
+
+    candidates = game_state.get("correct_candidates") or []
+    print("[DEBUG] Resolving winner among:")
+    for c in candidates:
+        m = c["message"]
+        print(f"   - {m.author} at {m.created_at.isoformat()} content={m.content!r}")
+
+    # No correct answers after all
+    if not candidates:
+        return
+
+    # Pick earliest by message.created_at
+    winner_entry = min(
+        candidates,
+        key=lambda c: c["message"].created_at.timestamp(),
+    )
+
+    #print winner entry timestamp
+    print(f"   - {winner_entry['message'].created_at.isoformat()} content={winner_entry['message'].content!r}")
+
+    winner_msg: discord.Message = winner_entry["message"]
+    winner_user = winner_msg.author
+    winner_id = winner_user.id
+
+    game_state["winner_id"] = winner_id  # mark resolved for this round
+
+    # Update in-memory game score
+    scores = game_state["scores"]
+    scores[winner_id] = scores.get(winner_id, 0) + 1
+
+    # Award 1 leaderboard point (multi-round)
+    if winner_msg.guild is not None:
+        guild_id = winner_msg.guild.id
+        display_name = winner_user.display_name
+        points = 1
+        await award_points(guild_id, winner_id, display_name, points)
+
+    correct_answers = game_state["current_question"]["answers"]
+    await channel.send(
+        "✅ {mention} got it right. Correct answer: **{answer}**.".format(
+            mention=winner_user.mention,
+            answer=correct_answers[0],
+        )
+    )
+
+    # Clear candidates for this round
+    game_state["correct_candidates"] = []
+    game_state["resolving"] = False
+
+    # Next round or end game
+    if game_state["round"] >= game_state["max_rounds"]:
+        await asyncio.sleep(2)
+        await end_game(channel, game_state)
+    else:
+        await asyncio.sleep(2)
+        await ask_next_round(channel, game_state)
 
 
 def main():
