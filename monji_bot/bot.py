@@ -6,7 +6,7 @@ from discord.ext import commands
 
 from monji_bot.llm_bot import generate_reply
 from .config import BOT_TOKEN
-from .trivia.manager import get_random_question
+from .trivia.manager import get_random_question, reset_session_questions
 from .db import init_schema, award_points, get_leaderboard, get_user_rank
 from .utils.fuzzy import is_correct_answer
 
@@ -119,6 +119,9 @@ async def trivia(interaction: discord.Interaction, rounds: int):
     Start a multi-round trivia game in this channel.
     Usage: /trivia rounds:10  (between 5 and 100 rounds)
     """
+    # reset session questions
+    reset_session_questions()
+
     if interaction.channel is None:
         await interaction.response.send_message(
             "I can only run trivia in a text channel.",
