@@ -32,9 +32,12 @@ bot = commands.Bot(
 # }
 GAMES: dict[int, dict] = {}
 
+#Game events
 EVENT_MENTION = "mention"
 EVENT_HINT_3 = "hint_3"
 EVENT_NO_ANSWER = "no_answer"
+EVENT_MID_ROUND_QUIP = "mid_round_quip"
+
 KEY_TEXT = "text"
 KEY_HINT = "hint"
 
@@ -157,7 +160,8 @@ async def trivia(interaction: discord.Interaction, rounds: int):
         "scores": {},  # user_id -> int
         "in_progress": True,
         "correct_candidates": [],
-        "resolving": False
+        "resolving": False,
+        "midgame_quip_done": False
     }
     GAMES[channel.id] = state
 
@@ -362,6 +366,9 @@ async def end_game(channel: discord.TextChannel, state: dict):
 
     msg = "🎮 **Game over.** Here’s the damage:\n" + "\n".join(lines)
     await channel.send(msg)
+
+    # Extra LLM commentary based on final scores (reuses midgame quip logic)
+    await handle_midgame_quip(channel, state)
 
 
 # -----------------------------
@@ -593,10 +600,6 @@ async def resolve_round_winner(
         return
 
     candidates = game_state.get("correct_candidates") or []
-    print("[DEBUG] Resolving winner among:")
-    for c in candidates:
-        m = c["message"]
-        print(f"   - {m.author} at {m.created_at.isoformat()} content={m.content!r}")
 
     # No correct answers after all
     if not candidates:
@@ -607,9 +610,6 @@ async def resolve_round_winner(
         candidates,
         key=lambda c: c["message"].created_at.timestamp(),
     )
-
-    #print winner entry timestamp
-    print(f"   - {winner_entry['message'].created_at.isoformat()} content={winner_entry['message'].content!r}")
 
     winner_msg: discord.Message = winner_entry["message"]
     winner_user = winner_msg.author
@@ -636,6 +636,21 @@ async def resolve_round_winner(
         )
     )
 
+    # --- Mid-game quip trigger ---
+    max_rounds = game_state.get("max_rounds", 0)
+    current_round = game_state.get("round", 0)
+    midpoint = max_rounds // 2  # e.g. 10 -> 5, 9 -> 4
+
+    if (
+        max_rounds >= 15
+        and current_round == midpoint
+        and not game_state.get("midgame_quip_done")
+    ):
+        game_state["midgame_quip_done"] = True
+        asyncio.create_task(handle_midgame_quip(channel, game_state))
+    # --- end mid-game quip trigger ---
+
+
     # Clear candidates for this round
     game_state["correct_candidates"] = []
     game_state["resolving"] = False
@@ -648,6 +663,60 @@ async def resolve_round_winner(
         await asyncio.sleep(2)
         await ask_next_round(channel, game_state)
 
+
+async def handle_midgame_quip(channel: discord.TextChannel, state: dict):
+    guild = channel.guild
+    if guild is None:
+        return
+
+    # Skip commentary entirely for short games
+    max_rounds = state.get("max_rounds", 0)
+    if max_rounds < 15:
+        return
+
+    # Build list of (member, score) for players in this game
+    players: list[tuple[discord.Member, int]] = []
+    for user_id, score in state.get("scores", {}).items():
+        member = guild.get_member(user_id)
+        if member is not None and not member.bot:
+            players.append((member, score))
+
+    if not players:
+        return
+
+    data = {
+        "round": state.get("round"),
+        "max_rounds": max_rounds,
+        "scores": [
+            {"display_name": member.display_name, "score": score}
+            for member, score in players
+        ],
+    }
+
+    print(data)
+
+    # LLM call (sync function in a thread)
+    text = await asyncio.to_thread(
+        generate_reply,
+        EVENT_MID_ROUND_QUIP,
+        data,
+    )
+
+    if not text:
+        return
+
+    # Replace @display_name with real Discord mention so it turns blue
+    for member, _ in players:
+        placeholder = f"@{member.display_name}"
+        if placeholder in text:
+            text = text.replace(placeholder, member.mention, 1)
+            break  # only one @ allowed
+
+    # Optional: clamp length if you want
+    if len(text) > 200:
+        text = text[:200]
+
+    await channel.send(text)
 
 def main():
     """Entry point when running `python -m monji_bot.bot`."""
