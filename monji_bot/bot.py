@@ -705,12 +705,11 @@ async def handle_midgame_quip(channel: discord.TextChannel, state: dict):
     if not text:
         return
 
-    # Replace @display_name with real Discord mention so it turns blue
+    # Replace ALL @display_name occurrences with real Discord mentions
     for member, _ in players:
         placeholder = f"@{member.display_name}"
         if placeholder in text:
-            text = text.replace(placeholder, member.mention, 1)
-            break  # only one @ allowed
+            text = text.replace(placeholder, member.mention)
 
     # Optional: clamp length if you want
     if len(text) > 200:
