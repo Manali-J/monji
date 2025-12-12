@@ -44,9 +44,9 @@ KEY_HINT = "hint"
 # -----------------------------
 # HINT / TIMEOUT CONFIG
 # -----------------------------
-HINT_DELAY_SECONDS = 30       # time before first hint
-HINT_INTERVAL_SECONDS = 24    # time between hints
-FINAL_WAIT_SECONDS = 15       # time after last hint before giving up
+HINT_DELAY_SECONDS = 25       # time before first hint
+HINT_INTERVAL_SECONDS = 20    # time between hints
+FINAL_WAIT_SECONDS = 10       # time after last hint before giving up
 
 WINNER_RESOLUTION_DELAY = 1  # seconds to wait for near-simultaneous answers
 
