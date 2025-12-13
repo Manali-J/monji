@@ -1,0 +1,17 @@
+# monji_bot/trivia/constants.py
+from monji_bot.trivia.state import GameState
+
+EVENT_MENTION = "mention"
+EVENT_HINT_3 = "hint_3"
+EVENT_NO_ANSWER = "no_answer"
+EVENT_MID_ROUND_QUIP = "mid_round_quip"
+
+KEY_TEXT = "text"
+KEY_HINT = "hint"
+
+HINT_DELAY_SECONDS = 25
+HINT_INTERVAL_SECONDS = 20
+FINAL_WAIT_SECONDS = 10
+WINNER_RESOLUTION_DELAY = 0.8
+
+GAMES: dict[int, GameState] = {}
