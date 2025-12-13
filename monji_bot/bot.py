@@ -4,6 +4,7 @@ import asyncio
 
 import discord
 from discord.ext import commands
+from discord import app_commands
 
 from monji_bot.llm.commentary import generate_reply
 from monji_bot.scramble.scramble_lifecycle import ask_next_scramble_round, end_scramble_game
@@ -134,9 +135,18 @@ async def ping(interaction: discord.Interaction):
 # -----------------------------
 @bot.tree.command(
     name="leaderboard",
-    description="Show the top trivia players in this server.",
+    description="Show the leaderboard for a specific game mode.",
 )
-async def leaderboard(interaction: discord.Interaction):
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="Trivia", value=MODE_TRIVIA),
+        app_commands.Choice(name="Scramble", value=MODE_SCRAMBLE),
+    ]
+)
+async def leaderboard(
+    interaction: discord.Interaction,
+    mode: app_commands.Choice[str],
+):
     # Only works in servers
     if interaction.guild is None:
         await interaction.response.send_message(
@@ -148,41 +158,63 @@ async def leaderboard(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
 
     guild_id = interaction.guild.id
-    rows = await get_leaderboard(guild_id, limit=10)
+    selected_mode = mode.value
+
+    rows = await get_leaderboard(
+        guild_id=guild_id,
+        mode=selected_mode,
+        limit=10,
+    )
 
     if not rows:
         await interaction.followup.send(
-            "No one is on the leaderboard yet. Answer a question to claim the top spot!"
+            f"No one is on the **{selected_mode}** leaderboard yet. Be the first."
         )
         return
 
     lines = []
     for idx, row in enumerate(rows, start=1):
         user_id = row["user_id"]
-        display_name = row["display_name"] or f"<@{user_id}>"
         score_total = row["score_total"]
 
-        # Try to resolve current nickname/display name
         member = interaction.guild.get_member(user_id)
-        if member is not None:
-            display_name = member.display_name
+        display_name = (
+            member.display_name
+            if member is not None
+            else row["display_name"] or f"<@{user_id}>"
+        )
 
         lines.append(f"**#{idx}** — {display_name} — {score_total} pts")
 
+    title = (
+        "🏆 Trivia Leaderboard"
+        if selected_mode == MODE_TRIVIA
+        else "🔀 Scramble Leaderboard"
+    )
+
     embed = discord.Embed(
-        title="🏆 Monji Leaderboard",
+        title=title,
         description="\n".join(lines),
     )
-    embed.set_footer(text=f"Server: {interaction.guild.name}")
+    embed.set_footer(text="Scores are tracked separately per game mode.")
 
     await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(
     name="leaderboard_me",
-    description="Show your rank and score in this server.",
+    description="Show your rank and score for a specific game mode.",
 )
-async def leaderboard_me(interaction: discord.Interaction):
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="Trivia", value=MODE_TRIVIA),
+        app_commands.Choice(name="Scramble", value=MODE_SCRAMBLE),
+    ]
+)
+async def leaderboard_me(
+    interaction: discord.Interaction,
+    mode: app_commands.Choice[str],
+):
     if interaction.guild is None:
         await interaction.response.send_message(
             "This command can only be used in a server.",
@@ -194,25 +226,37 @@ async def leaderboard_me(interaction: discord.Interaction):
 
     guild_id = interaction.guild.id
     user_id = interaction.user.id
+    selected_mode = mode.value
 
-    result = await get_user_rank(guild_id, user_id)
+    result = await get_user_rank(
+        guild_id=guild_id,
+        user_id=user_id,
+        mode=selected_mode,
+    )
+
     if result is None:
         await interaction.followup.send(
-            "You're not on the leaderboard yet. Answer a question to earn your first points!"
+            f"You're not on the **{selected_mode}** leaderboard yet. Go earn it 😏"
         )
         return
 
     rank, score_total = result
     display_name = interaction.user.display_name
 
+    title = (
+        "📊 Your Trivia Rank"
+        if selected_mode == MODE_TRIVIA
+        else "📊 Your Scramble Rank"
+    )
+
     embed = discord.Embed(
-        title="📊 Your Monji Rank",
+        title=title,
         description=(
             f"{display_name}, you are **#{rank}** in this server "
             f"with **{score_total}** points."
         ),
     )
-    embed.set_footer(text=f"Server: {interaction.guild.name}")
+    embed.set_footer(text="Ranks are tracked separately per game mode.")
 
     await interaction.followup.send(embed=embed)
 

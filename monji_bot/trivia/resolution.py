@@ -57,12 +57,13 @@ async def resolve_round_winner(
     state.scores[winner_id] = state.scores.get(winner_id, 0) + 1
 
     # Persist leaderboard score
-    if state.mode == 'trivia' and winner_msg.guild is not None:
+    if winner_msg.guild is not None:
         await award_points(
             guild_id=winner_msg.guild.id,
             user_id=winner_id,
             display_name=winner_user.display_name,
             points=1,
+            mode=state.mode
         )
 
     if state.mode == MODE_TRIVIA:
