@@ -3,10 +3,11 @@
 import asyncio
 import discord
 
-from monji_bot.trivia.constants import WINNER_RESOLUTION_DELAY
+from monji_bot.scramble.scramble_lifecycle import ask_next_scramble_round, end_scramble_game
+from monji_bot.trivia.constants import WINNER_RESOLUTION_DELAY, ROUND_TRANSITION_DELAY, MODE_TRIVIA
 from monji_bot.trivia.lifecycle import ask_next_round, end_game
-from monji_bot.trivia.commentary import handle_midgame_quip
-from monji_bot.trivia.state import GameState
+from monji_bot.llm.commentary import handle_midgame_quip
+from monji_bot.common.state import GameState
 from monji_bot.db import award_points
 
 
@@ -56,7 +57,7 @@ async def resolve_round_winner(
     state.scores[winner_id] = state.scores.get(winner_id, 0) + 1
 
     # Persist leaderboard score
-    if winner_msg.guild is not None:
+    if state.mode == 'trivia' and winner_msg.guild is not None:
         await award_points(
             guild_id=winner_msg.guild.id,
             user_id=winner_id,
@@ -64,7 +65,10 @@ async def resolve_round_winner(
             points=1,
         )
 
-    correct_answer = state.current_question["answers"][0]
+    if state.mode == MODE_TRIVIA:
+        correct_answer = state.current_question["answers"][0]
+    else:  # scramble
+        correct_answer = state.current_question["word"]
     await channel.send(
         f"✅ {winner_user.mention} got it right. "
         f"Correct answer: **{correct_answer}**."
@@ -86,10 +90,16 @@ async def resolve_round_winner(
     state.correct_candidates.clear()
     state.resolving = False
 
-    # Next round or end game
+    await asyncio.sleep(ROUND_TRANSITION_DELAY)
+
     if state.round >= state.max_rounds:
-        await asyncio.sleep(2)
-        await end_game(channel, state)
+        if state.mode == MODE_TRIVIA:
+            await end_game(channel, state)
+        else:  # scramble
+            await end_scramble_game(channel, state)
     else:
-        await asyncio.sleep(2)
-        await ask_next_round(channel, state)
+        if state.mode == MODE_TRIVIA:
+            await ask_next_round(channel, state)
+        else:  # scramble
+            await ask_next_scramble_round(channel, state)
+

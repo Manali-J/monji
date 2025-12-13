@@ -5,11 +5,13 @@ import asyncio
 import discord
 from discord.ext import commands
 
-from monji_bot.llm_bot import generate_reply
-from monji_bot.trivia.constants import GAMES, EVENT_MENTION, KEY_TEXT
+from monji_bot.llm.commentary import generate_reply
+from monji_bot.scramble.scramble_lifecycle import ask_next_scramble_round, end_scramble_game
+from monji_bot.scramble.scramble_manager import reset_scramble_session
+from monji_bot.trivia.constants import GAMES, EVENT_MENTION, KEY_TEXT, MODE_TRIVIA, MODE_SCRAMBLE
 from monji_bot.trivia.lifecycle import end_game, ask_next_round
 from monji_bot.trivia.resolution import resolve_round_winner
-from monji_bot.trivia.state import GameState, CorrectCandidate
+from monji_bot.common.state import GameState, CorrectCandidate
 from .config import BOT_TOKEN
 from .db import init_schema, get_leaderboard, get_user_rank
 from .trivia.manager import reset_session_questions
@@ -24,6 +26,80 @@ bot = commands.Bot(
     intents=intents,
     help_command=None,
 )
+
+async def start_game(
+    *,
+    interaction: discord.Interaction,
+    rounds: int,
+    mode: str,
+    reset_session,
+    ask_next_round,
+    start_message: str,
+):
+    reset_session()
+
+    if interaction.channel is None:
+        await interaction.response.send_message(
+            "I can only run games in a text channel.",
+            ephemeral=True,
+        )
+        return
+
+    channel = interaction.channel
+
+    if rounds < 5 or rounds > 100:
+        await interaction.response.send_message(
+            "Pick a number between **5 and 100** rounds.",
+            ephemeral=True,
+        )
+        return
+
+    existing = GAMES.get(channel.id)
+    if existing and existing.in_progress:
+        await interaction.response.send_message(
+            "There’s already a game running in this channel.",
+            ephemeral=True,
+        )
+        return
+
+    state = GameState.new(rounds)
+    state.mode = mode  # lightweight, explicit
+    GAMES[channel.id] = state
+
+    await interaction.response.send_message(start_message)
+    await ask_next_round(channel, state)
+
+
+async def stop_game(
+    *,
+    interaction: discord.Interaction,
+    mode: str,
+    end_game,
+):
+    if interaction.channel is None:
+        await interaction.response.send_message(
+            "I can only stop games in a text channel.",
+            ephemeral=True,
+        )
+        return
+
+    channel = interaction.channel
+    state = GAMES.get(channel.id)
+
+    if not state or not state.in_progress or getattr(state, "mode", None) != mode:
+        await interaction.response.send_message(
+            f"There’s no {mode} game running here.",
+            ephemeral=True,
+        )
+        return
+
+    state.in_progress = False
+
+    await interaction.response.send_message(
+        f"⛔ **{mode.capitalize()} game stopped.**"
+    )
+
+    await end_game(channel, state)
 
 
 @bot.event
@@ -40,7 +116,6 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Error syncing app commands: {e}")
 
-
 # -----------------------------
 # SIMPLE PING COMMAND
 # -----------------------------
@@ -53,109 +128,6 @@ async def ping(interaction: discord.Interaction):
         "Pong! Monji is awake... unfortunately.",
         ephemeral=True,
     )
-
-# -----------------------------
-# MULTI-ROUND GAME: /trivia
-# -----------------------------
-@bot.tree.command(
-    name="trivia",
-    description="Start a multi-round trivia game in this channel.",
-)
-async def trivia(interaction: discord.Interaction, rounds: int):
-    """
-    Start a multi-round trivia game in this channel.
-    Usage: /trivia rounds:10  (between 5 and 100 rounds)
-    """
-    # reset session questions
-    reset_session_questions()
-
-    if interaction.channel is None:
-        await interaction.response.send_message(
-            "I can only run trivia in a text channel.",
-            ephemeral=True,
-        )
-        return
-
-    channel = interaction.channel
-
-    # Validate rounds
-    if rounds < 5 or rounds > 100:
-        await interaction.response.send_message(
-            "Pick a number between **5 and 100** rounds. I refuse to work outside those limits.",
-            ephemeral=True,
-        )
-        return
-
-    # Prevent starting a game if one is already running
-    state = GAMES.get(channel.id)
-    if state and state.in_progress:
-        await interaction.response.send_message(
-            "There’s already a trivia game running in this channel. Calm down.",
-            ephemeral=True,
-        )
-        return
-
-    # Create new game state
-    state = GameState.new(rounds)
-    GAMES[channel.id] = state
-
-    # Respond to the interaction so Discord stops showing "thinking"
-    await interaction.response.send_message(
-        f"Starting a trivia game with **{rounds} questions.**\n"
-        f"Fastest correct answer wins each round. Try not to embarrass yourselves.\n\n"
-    )
-
-    # Ask the first question as normal channel messages
-    await ask_next_round(channel, state)
-
-
-@bot.tree.command(
-    name="trivia_stop",
-    description="Force-stop any ongoing trivia in this channel.",
-)
-async def trivia_stop(interaction: discord.Interaction):
-    """
-    Force-stop any ongoing trivia in this channel.
-    Shows scores if stopping a multi-round game.
-    """
-    if interaction.channel is None:
-        await interaction.response.send_message(
-            "I can only stop trivia in a text channel.",
-            ephemeral=True,
-        )
-        return
-
-    channel = interaction.channel
-    channel_id = channel.id
-
-    # 1) Stop multi-round game if active
-    game_state = GAMES.get(channel_id)
-    if game_state and game_state.in_progress:
-        game_state.in_progress = False
-        game_state.current_question = None
-        game_state.winner_id = None
-        game_state.correct_candidates.clear()
-        game_state.resolving = False
-
-        scores = game_state.scores
-
-        if scores:
-            # respond to the slash command
-            await interaction.response.send_message(
-                "⛔ **Trivia game stopped early. Here's your scoreboard:**"
-            )
-            # scoreboard goes as a normal channel message
-            await end_game(channel, game_state)
-        else:
-            await interaction.response.send_message(
-                "⛔ **Trivia game stopped.** No scores to show."
-            )
-
-        return
-
-    # 2) Nothing running
-    await interaction.response.send_message("There's no trivia running here.")
-
 
 # -----------------------------
 # LEADERBOARD COMMANDS
@@ -244,6 +216,61 @@ async def leaderboard_me(interaction: discord.Interaction):
 
     await interaction.followup.send(embed=embed)
 
+@bot.tree.command(
+    name="trivia",
+    description="Start a multi-round trivia game in this channel.",
+)
+async def trivia(interaction: discord.Interaction, rounds: int):
+    await start_game(
+        interaction=interaction,
+        rounds=rounds,
+        mode="trivia",
+        reset_session=reset_session_questions,
+        ask_next_round=ask_next_round,
+        start_message=(
+            f"Starting a trivia game with **{rounds} questions.**\n"
+            f"Fastest correct answer wins each round. Try not to embarrass yourselves.\n\n"
+        ),
+    )
+
+@bot.tree.command(
+    name="trivia_stop",
+    description="Force-stop any ongoing trivia in this channel.",
+)
+async def trivia_stop(interaction: discord.Interaction):
+    await stop_game(
+        interaction=interaction,
+        mode="trivia",
+        end_game=end_game,
+    )
+
+@bot.tree.command(
+    name="scramble",
+    description="Start a multi-round word scramble game in this channel.",
+)
+async def scramble(interaction: discord.Interaction, rounds: int):
+    await start_game(
+        interaction=interaction,
+        rounds=rounds,
+        mode="scramble",
+        reset_session=reset_scramble_session,
+        ask_next_round=ask_next_scramble_round,
+        start_message=(
+            f"🔀 Starting a **{rounds}-round scramble game**.\n"
+            f"Unscramble the word. Fastest answer wins.\n\n"
+        ),
+    )
+
+@bot.tree.command(
+    name="scramble_stop",
+    description="Force-stop any ongoing scramble game in this channel.",
+)
+async def scramble_stop(interaction: discord.Interaction):
+    await stop_game(
+        interaction=interaction,
+        mode="scramble",
+        end_game=end_scramble_game,
+    )
 
 # -----------------------------
 # MESSAGE LISTENER (CHECK ANSWERS)
@@ -268,20 +295,30 @@ async def on_message(message: discord.Message):
             and game_state.in_progress
             and game_state.current_question
     ):
-        user_answer = message.content
-        correct_answers = game_state.current_question["answers"]
+        user_answer = message.content.strip()
 
-        if is_correct_answer(user_answer, correct_answers):
-            # Collect all correct answers for this round, resolve after a short delay
+        is_correct = False
+
+        if game_state.mode == MODE_TRIVIA:
+            correct_answers = game_state.current_question["answers"]
+            is_correct = is_correct_answer(user_answer, correct_answers)
+
+        elif game_state.mode == MODE_SCRAMBLE:
+            correct_word = game_state.current_question["word"]
+            is_correct = user_answer.lower() == correct_word.lower()
+
+        # Shared resolution logic
+        if is_correct:
             game_state.correct_candidates.append(
                 CorrectCandidate(message=message)
             )
 
-            # If this is the first correct answer we saw, schedule resolution
             if len(game_state.correct_candidates) == 1 and game_state.winner_id is None:
                 this_round = game_state.round
                 game_state.resolving = True
-                asyncio.create_task(resolve_round_winner(channel, game_state, this_round))
+                asyncio.create_task(
+                    resolve_round_winner(channel, game_state, this_round)
+                )
 
         # Important: still process commands even during a game
         await bot.process_commands(message)

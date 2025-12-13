@@ -4,10 +4,10 @@
 import asyncio
 import discord
 
-from monji_bot.trivia.commentary import handle_midgame_quip
+from monji_bot.llm.commentary import handle_midgame_quip
 from monji_bot.trivia.hints import handle_game_question_timeout
 from monji_bot.trivia.manager import get_random_question
-from monji_bot.trivia.state import GameState
+from monji_bot.common.state import GameState
 
 
 async def ask_next_round(channel: discord.TextChannel, state: GameState):

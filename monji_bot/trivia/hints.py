@@ -3,7 +3,7 @@
 import asyncio
 import discord
 
-from monji_bot.llm_bot import generate_reply
+from monji_bot.llm.commentary import generate_reply
 from monji_bot.trivia.constants import (
     HINT_DELAY_SECONDS,
     HINT_INTERVAL_SECONDS,
@@ -13,29 +13,30 @@ from monji_bot.trivia.constants import (
     EVENT_NO_ANSWER,
     KEY_HINT,
 )
-from monji_bot.trivia.state import GameState
+from monji_bot.common.state import GameState
 
 
 def build_hint(answer: str, level: int) -> str:
-    """
-    Build a starting-letters style hint.
-    level 1-3: progressively reveal more of each word.
-    """
     words = answer.split()
     hints = []
 
     for w in words:
         length = len(w)
+
         if length == 0:
             hints.append("")
             continue
 
-        if level == 1:
-            show = max(1, length // 4)
-        elif level == 2:
-            show = max(1, length // 2)
+        # 👇 prevent "The" / "An" from being fully revealed
+        if length <= 3:
+            show = 1
         else:
-            show = max(1, (3 * length) // 4)
+            if level == 1:
+                show = max(1, length // 4)
+            elif level == 2:
+                show = max(1, length // 2)
+            else:
+                show = max(1, (3 * length) // 4)
 
         visible = w[:show]
         hidden = "•" * (length - show)
@@ -44,33 +45,45 @@ def build_hint(answer: str, level: int) -> str:
     return " ".join(hints)
 
 
-# -----------------------------
-# HINT / TIMEOUT HANDLER
-# -----------------------------
+
+# --------------------------------------------------
+# HINT / TIMEOUT HANDLER (NO GAME FLOW HERE)
+# --------------------------------------------------
 async def handle_game_question_timeout(
     channel: discord.TextChannel,
     state: GameState,
 ):
     """
-    Run the hint cycle + timeout for the current game question in this channel.
-    Exits early if someone answers, the game stops, or the round changes.
+    Handles hints + timeout.
+    DOES NOT advance rounds or end the game.
+    Returns "timeout" if nobody answered.
     """
     this_round = state.round
     q = state.current_question
 
     if not q:
-        return
+        return None
 
-    correct_answers = q.get("answers") or []
-    if not correct_answers:
-        return
+    # ---- Mode-aware answer ----
+    if state.mode == "trivia":
+        answers = q.get("answers") or []
+        if not answers:
+            return None
+        main_answer = answers[0]
 
-    main_answer = correct_answers[0]
+    elif state.mode == "scramble":
+        main_answer = q.get("word")
+        if not main_answer:
+            return None
+        answers = [main_answer]
 
-    # Disable hints if ANY correct answer is a single character
-    single_char_answer = any(len(a.strip()) == 1 for a in correct_answers)
+    else:
+        return None
+    # ---------------------------
 
-    # Initial wait before first hint
+    single_char_answer = any(len(a.strip()) == 1 for a in answers)
+
+    # Initial delay
     await asyncio.sleep(HINT_DELAY_SECONDS)
 
     # Hints 1–3
@@ -80,9 +93,13 @@ async def handle_game_question_timeout(
             or state.winner_id is not None
             or state.round != this_round
         ):
-            return
+            return None
 
-        if not single_char_answer:
+        if single_char_answer:
+            await channel.send(
+                f"💡 **Hint {level}/3:** `No hints for single-character answers.`"
+            )
+        else:
             hint_text = build_hint(main_answer, level)
 
             if level < 3:
@@ -92,6 +109,7 @@ async def handle_game_question_timeout(
             else:
                 data = {
                     KEY_HINT: hint_text,
+                    "mode": state.mode,
                     "answer": main_answer,
                     "round": this_round,
                     "max_rounds": state.max_rounds,
@@ -106,7 +124,7 @@ async def handle_game_question_timeout(
 
                 if sarcasm:
                     if main_answer.lower() in sarcasm.lower():
-                        sarcasm = "Wow, third hint already? Rough one."
+                        sarcasm = "Yeah… that was dangerously close."
                     if len(sarcasm) > 200:
                         sarcasm = sarcasm[:200]
 
@@ -117,19 +135,13 @@ async def handle_game_question_timeout(
                     await channel.send(
                         f"💡 **Hint 3/3:** `{hint_text}`"
                     )
-        else:
-            hint_text = "No hints! Answer is a single character."
-            await channel.send(
-                f"💡 **Hint {level}/3:** `{hint_text}`"
-            )
 
         if level < 3:
             await asyncio.sleep(HINT_INTERVAL_SECONDS)
 
-    # Final wait before giving up
+    # Final wait
     await asyncio.sleep(FINAL_WAIT_SECONDS)
 
-    # If winner resolution is ongoing, wait briefly
     if state.resolving:
         await asyncio.sleep(WINNER_RESOLUTION_DELAY + 0.1)
 
@@ -138,13 +150,14 @@ async def handle_game_question_timeout(
         or state.winner_id is not None
         or state.round != this_round
     ):
-        return
+        return None
 
-    # 🔒 Lock this round: time's up
+    # Time’s up
     state.winner_id = -1
     state.correct_candidates.clear()
 
     data = {
+        "mode": state.mode,
         "answer": main_answer,
         "round": this_round,
         "max_rounds": state.max_rounds,
@@ -173,5 +186,4 @@ async def handle_game_question_timeout(
 
     await channel.send(msg)
 
-    # Move on
     return "timeout"

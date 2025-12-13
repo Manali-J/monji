@@ -1,8 +1,11 @@
-# monji_bot/llm_bot.py
-
+import asyncio
+import discord
 import json
 from openai import OpenAI
-from .config import OPENAI_API_KEY
+
+from monji_bot.config import OPENAI_API_KEY
+from monji_bot.trivia.constants import EVENT_MID_ROUND_QUIP
+from monji_bot.common.state import GameState
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -125,7 +128,22 @@ GLOBAL RULES
   "Monji comes from two Japanese kanji — '問' (mon) meaning 'to ask' and '字' (ji)
    meaning 'character'. So yeah, my name literally means 'question character.'
    Fitting, right?"
+   
+---------------------------------------------------------------------------
+MODE AWARENESS
+---------------------------------------------------------------------------
+- DATA["mode"] will be either "trivia" or "scramble".
+
+- If mode = "scramble":
+  * The challenge is a scrambled single English word.
+  * Do NOT reference trivia, facts, knowledge, or learning.
+  * Speak as if this is a pure word game.
+  * Reactions should feel like “you couldn’t crack the word”, not “you didn’t know it”.
+
+- If mode = "trivia":
+  * Normal trivia behavior applies.
 """
+
 
 def generate_reply(event: str, data: dict | None = None) -> str:
     """
@@ -143,7 +161,7 @@ def generate_reply(event: str, data: dict | None = None) -> str:
             model="gpt-4.1-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",    "content": payload},
+                {"role": "user", "content": payload},
             ],
             timeout=10,
         )
@@ -161,3 +179,55 @@ def generate_reply(event: str, data: dict | None = None) -> str:
             return "I'm having a moment. Try again in a sec."
 
         return ""
+
+
+async def handle_midgame_quip(channel: discord.TextChannel, state: GameState):
+    guild = channel.guild
+    if guild is None:
+        return
+
+    # Skip commentary entirely for short games
+    if state.max_rounds < 15:
+        return
+
+    # Build list of (member, score) for players in this game
+    players: list[tuple[discord.Member, int]] = []
+    for user_id, score in state.scores.items():
+        member = guild.get_member(user_id)
+        if member is not None and not member.bot:
+            players.append((member, score))
+
+    if not players:
+        return
+
+    data = {
+        "mode": state.mode,
+        "round": state.round,
+        "max_rounds": state.max_rounds,
+        "scores": [
+            {"display_name": member.display_name, "score": score}
+            for member, score in players
+        ],
+    }
+
+    # LLM call (sync function in a thread)
+    text = await asyncio.to_thread(
+        generate_reply,
+        EVENT_MID_ROUND_QUIP,
+        data,
+    )
+
+    if not text:
+        return
+
+    # Replace ALL @display_name occurrences with real Discord mentions
+    for member, _ in players:
+        placeholder = f"@{member.display_name}"
+        if placeholder in text:
+            text = text.replace(placeholder, member.mention)
+
+    # Optional: clamp length
+    if len(text) > 200:
+        text = text[:200]
+
+    await channel.send(text)
