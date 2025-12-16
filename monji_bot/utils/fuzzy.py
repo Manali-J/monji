@@ -1,5 +1,3 @@
-# monji_bot/utils/fuzzy.py
-
 from difflib import SequenceMatcher
 
 # Very small set of “useless” words that should not count as an answer by themselves
@@ -21,7 +19,7 @@ STOPWORDS = {
 def normalize(text: str) -> str:
     """Lowercase, strip spaces, remove basic punctuation."""
     text = text.strip().lower()
-    for ch in [".", ",", "!", "?", ":", ";", "\"", "'", "’", "(", ")", "[", "]"]:
+    for ch in [".", ",", "!", "?", ":", ";", "\"", "'", "’", "(", ")", "[", "]", "-"]:
         text = text.replace(ch, "")
     return " ".join(text.split())
 
@@ -37,7 +35,7 @@ def all_numeric(answers) -> bool:
     return all(is_numeric(a) for a in answers)
 
 
-def is_fuzzy_match(user_answer: str, correct_answer: str, threshold: float = 0.8) -> bool:
+def is_fuzzy_match(user_answer: str, correct_answer: str, threshold: float = 0.9) -> bool:
     """
     Return True if the user's answer is 'close enough' to the correct answer.
     Used for free-text trivia answers.
@@ -48,12 +46,11 @@ def is_fuzzy_match(user_answer: str, correct_answer: str, threshold: float = 0.8
     if not ua or not ca:
         return False
 
-    # Split into tokens
     ua_tokens = ua.split()
     ca_tokens = ca.split()
     multi_word_correct = len(ca_tokens) > 1
 
-    # If the user answer is only stopwords (e.g. "the", "of the"), auto-fail
+    # If the user answer is only stopwords, auto-fail
     if all(token in STOPWORDS for token in ua_tokens):
         return False
 
@@ -61,36 +58,31 @@ def is_fuzzy_match(user_answer: str, correct_answer: str, threshold: float = 0.8
     if ua == ca:
         return True
 
-    # Special handling for single-word correct answers
-    if not multi_word_correct:
-        # Very short answers (<= 4 letters), e.g. "Mali", "Lao", "Peru"
-        # Too sensitive to fuzzy noise, so:
-        #  - require same starting letter
-        #  - and a stricter similarity threshold (0.9)
-        if len(ca) <= 4:
-            if ua[0] != ca[0]:
-                return False
+    # -----------------------------
+    # STRICT RULE FOR MULTI-WORD ANSWERS
+    # -----------------------------
+    if multi_word_correct:
+        ua_set = {t for t in ua_tokens if t not in STOPWORDS}
+        ca_set = {t for t in ca_tokens if t not in STOPWORDS}
+        return ua_set == ca_set
 
-            ratio = SequenceMatcher(None, ua, ca).ratio()
-            return ratio >= 0.9
-
-        # Longer single-word answers (e.g. "Paris", "London", "Everest"):
-        # - length difference must be small (to reject "xparisx")
-        # - first OR last letter must match
-        if abs(len(ua) - len(ca)) > 2:
+    # -----------------------------
+    # SINGLE-WORD ANSWERS (FUZZY BUT STRICT)
+    # -----------------------------
+    # Very short answers (<= 4 letters)
+    if len(ca) <= 4:
+        if ua[0] != ca[0]:
             return False
+        ratio = SequenceMatcher(None, ua, ca).ratio()
+        return ratio >= 0.9
 
-        if ua[0] != ca[0] and ua[-1] != ca[-1]:
-            return False
+    # Longer single-word answers
+    if abs(len(ua) - len(ca)) > 2:
+        return False
 
-    # Substring match:
-    # ⛔ Disabled for single-word answers to avoid cases like "Somalia" matching "Mali".
-    # ✅ Allowed only for multi-word correct answers AND multi-word user answers.
-    if multi_word_correct and len(ua) >= 3 and len(ua_tokens) >= 2:
-        if ua in ca or ca in ua:
-            return True
+    if ua[0] != ca[0] and ua[-1] != ca[-1]:
+        return False
 
-    # General fuzzy ratio on the full strings
     ratio = SequenceMatcher(None, ua, ca).ratio()
     return ratio >= threshold
 
@@ -98,17 +90,16 @@ def is_fuzzy_match(user_answer: str, correct_answer: str, threshold: float = 0.8
 def is_correct_answer(user_answer: str, correct_answers) -> bool:
     """
     Determines correctness:
-      - If all answers are numeric → exact match only (with int normalization).
-      - If all answers are single characters → exact match only (case-insensitive).
-      - Otherwise → fuzzy match.
+      - If all answers are numeric → exact match only.
+      - If all answers are single characters → exact match only.
+      - Otherwise → fuzzy/text match.
     """
     user_answer = user_answer.strip()
 
-    # NUMERIC MODE: all correct answers are numeric → strict numeric comparison
+    # NUMERIC MODE
     if all_numeric(correct_answers):
         if not is_numeric(user_answer):
             return False
-
         try:
             user_val = int(user_answer)
             correct_vals = [int(a) for a in correct_answers]
@@ -116,14 +107,13 @@ def is_correct_answer(user_answer: str, correct_answers) -> bool:
         except ValueError:
             return False
 
-    # SINGLE CHARACTER MODE: all correct answers are single characters (e.g., "A", "B")
+    # SINGLE CHARACTER MODE
     if all(len(a.strip()) == 1 for a in correct_answers):
-        # Case-insensitive exact match
         normalized_user = user_answer.lower()
         normalized_correct = [a.strip().lower() for a in correct_answers]
         return normalized_user in normalized_correct
 
-    # TEXT MODE: use fuzzy matching against any correct answer
+    # TEXT MODE
     for ca in correct_answers:
         if is_fuzzy_match(user_answer, ca):
             return True
