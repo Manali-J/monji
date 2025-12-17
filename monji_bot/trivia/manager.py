@@ -1,13 +1,12 @@
-# manager.py
 """
-Trivia manager (single-session, guild-aware).
+Trivia manager (guild-aware, DB-safe).
 
 Behavior:
-- Prefer questions least used in THIS guild.
-- Break ties using global times_asked.
-- Avoid repeats within the same session.
-- Selection + increments are atomic.
-- Uses FOR UPDATE SKIP LOCKED (Postgres-safe).
+- Prefer questions least used in THIS guild
+- Break ties using global times_asked
+- Avoid repeats using DB cooldown window
+- Selection + increments are atomic
+- Uses FOR UPDATE SKIP LOCKED (Postgres-safe)
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 from ..db import get_pool
 
@@ -23,21 +22,8 @@ logger = logging.getLogger(__name__)
 
 Question = Dict[str, Any]
 
-# Tracks questions used in the current trivia session (per channel/session)
-_used_in_session: Set[int] = set()
-
-# Serialize DB access
+# Serialize DB access (per process)
 _question_lock = asyncio.Lock()
-
-
-def reset_session_questions() -> None:
-    _used_in_session.clear()
-    logger.info("Trivia session reset")
-
-
-def stats_summary() -> Dict[str, int]:
-    return {"used_count": len(_used_in_session)}
-
 
 # -----------------------------
 # SQL
@@ -47,7 +33,16 @@ _SQL_PICK = """
 SELECT q.id, q.question, q.correct_answers
 FROM questions q
 WHERE q.approved = TRUE
-  AND ( $2::int[] IS NULL OR q.id <> ALL($2::int[]) )
+
+  -- Avoid recently-used questions in this guild
+  AND NOT EXISTS (
+    SELECT 1
+    FROM question_usage u
+    WHERE u.guild_id = $1
+      AND u.question_id = q.id
+      AND u.last_asked_at > NOW() - INTERVAL '1 hour'
+  )
+
 ORDER BY
   (
     SELECT COALESCE(u.times_asked, 0)
@@ -76,7 +71,6 @@ DO UPDATE SET
   last_asked_at = NOW()
 """
 
-
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -96,38 +90,45 @@ def _parse_answers(raw: Any) -> List[str]:
             return [raw]
     return [str(raw)]
 
-
 # -----------------------------
 # Public API
 # -----------------------------
 
 async def get_random_question(guild_id: int) -> Optional[Question]:
     """
-    Pick a question for a guild.
-    Fresh per-guild first, then global freshness.
+    Pick a trivia question for a guild.
+
+    Returns:
+        {
+          "id": int,
+          "question": str,
+          "answers": List[str]
+        }
     """
     async with _question_lock:
         pool = await get_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
 
-                used_list = list(_used_in_session) if _used_in_session else None
-
                 row = await conn.fetchrow(
                     _SQL_PICK,
                     guild_id,
-                    used_list,
                 )
 
                 if not row:
-                    logger.debug("No question found")
+                    logger.debug(
+                        "No eligible trivia question found for guild %s",
+                        guild_id,
+                    )
                     return None
 
                 qid = row["id"]
-                _used_in_session.add(qid)
 
                 # increment global
-                await conn.execute(_SQL_INCREMENT_GLOBAL, qid)
+                await conn.execute(
+                    _SQL_INCREMENT_GLOBAL,
+                    qid,
+                )
 
                 # increment per-guild
                 await conn.execute(
@@ -137,7 +138,12 @@ async def get_random_question(guild_id: int) -> Optional[Question]:
                 )
 
     answers = _parse_answers(row["correct_answers"])
-    logger.debug("Selected question id=%s", qid)
+
+    logger.debug(
+        "Selected trivia question id=%s guild=%s",
+        qid,
+        guild_id,
+    )
 
     return {
         "id": qid,
