@@ -1,20 +1,9 @@
-"""
-Trivia manager (session-aware, guild-safe).
-
-Behavior:
-- Prefer questions least used in THIS guild
-- Break ties using global times_asked
-- Avoid repeats within the same session
-- Selection + increments are atomic
-"""
-
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from ..db import get_pool
 
@@ -22,42 +11,28 @@ logger = logging.getLogger(__name__)
 
 Question = Dict[str, Any]
 
+# Track questions per guild in the current session
+_used_in_session: Dict[int, Set[int]] = {}
+
 _question_lock = asyncio.Lock()
 
-# -----------------------------
-# Session state (SAFE)
-# -----------------------------
 
-_current_session_id: Optional[str] = None
-
-
-def reset_session_questions() -> None:
-    """
-    Start a new trivia session.
-    """
-    global _current_session_id
-    _current_session_id = str(uuid.uuid4())
-    logger.info("New trivia session started: %s", _current_session_id)
+def reset_session_questions(guild_id: Optional[int] = None) -> None:
+    if guild_id is None:
+        _used_in_session.clear()
+    else:
+        _used_in_session.pop(guild_id, None)
 
 
 def stats_summary() -> Dict[str, int]:
-    return {"session_active": int(_current_session_id is not None)}
+    return {"guilds_active": len(_used_in_session)}
 
-# -----------------------------
-# SQL
-# -----------------------------
 
 _SQL_PICK = """
 SELECT q.id, q.question, q.correct_answers
 FROM questions q
 WHERE q.approved = TRUE
-  AND NOT EXISTS (
-    SELECT 1
-    FROM trivia_session_questions s
-    WHERE s.guild_id = $1
-      AND s.session_id = $2
-      AND s.question_id = q.id
-  )
+  AND ( $2::int[] IS NULL OR q.id <> ALL($2::int[]) )
 ORDER BY
   (
     SELECT COALESCE(u.times_asked, 0)
@@ -86,15 +61,6 @@ DO UPDATE SET
   last_asked_at = NOW()
 """
 
-_SQL_MARK_SESSION = """
-INSERT INTO trivia_session_questions (guild_id, session_id, question_id)
-VALUES ($1, $2, $3)
-ON CONFLICT DO NOTHING
-"""
-
-# -----------------------------
-# Helpers
-# -----------------------------
 
 def _parse_answers(raw: Any) -> List[str]:
     if raw is None:
@@ -111,41 +77,30 @@ def _parse_answers(raw: Any) -> List[str]:
             return [raw]
     return [str(raw)]
 
-# -----------------------------
-# Public API
-# -----------------------------
 
 async def get_random_question(guild_id: int) -> Optional[Question]:
-    global _current_session_id
-
-    if _current_session_id is None:
-        reset_session_questions()
-
     async with _question_lock:
         pool = await get_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
 
+                used = _used_in_session.setdefault(guild_id, set())
+                used_list = list(used) if len(used) > 0 else None
+
                 row = await conn.fetchrow(
                     _SQL_PICK,
                     guild_id,
-                    _current_session_id,
+                    used_list,
                 )
 
                 if not row:
-                    logger.debug("No eligible trivia questions for guild %s", guild_id)
                     return None
 
                 qid = row["id"]
+                used.add(qid)
 
                 await conn.execute(_SQL_INCREMENT_GLOBAL, qid)
                 await conn.execute(_SQL_INCREMENT_GUILD, guild_id, qid)
-                await conn.execute(
-                    _SQL_MARK_SESSION,
-                    guild_id,
-                    _current_session_id,
-                    qid,
-                )
 
     return {
         "id": qid,
