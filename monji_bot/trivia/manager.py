@@ -1,14 +1,13 @@
 # manager.py
 """
-Refactored trivia manager (single-session).
+Trivia manager (single-session, guild-aware).
 
 Behavior:
-- Always try to pick questions with times_asked = 0 first (unused globally).
-- If none, pick any times_asked = 0 (session filter might have excluded them).
-- If still none, fall back to least-times_asked ordering.
-- Avoid passing an empty list to `ALL(...)` by branching when the used set is empty.
-- Selection + times_asked increment happen inside a single DB transaction.
-- Uses FOR UPDATE SKIP LOCKED (Postgres) to avoid blocking other workers.
+- Prefer questions least used in THIS guild.
+- Break ties using global times_asked.
+- Avoid repeats within the same session.
+- Selection + increments are atomic.
+- Uses FOR UPDATE SKIP LOCKED (Postgres-safe).
 """
 
 from __future__ import annotations
@@ -24,74 +23,65 @@ logger = logging.getLogger(__name__)
 
 Question = Dict[str, Any]
 
-# Tracks questions used in the current trivia session (single-channel)
+# Tracks questions used in the current trivia session (per channel/session)
 _used_in_session: Set[int] = set()
 
-# Serialize DB access (keeps logic simple)
+# Serialize DB access
 _question_lock = asyncio.Lock()
 
 
 def reset_session_questions() -> None:
-    """Call this when a new trivia game/session starts."""
     _used_in_session.clear()
-    logger.info("Trivia session reset: cleared used question set")
+    logger.info("Trivia session reset")
 
 
 def stats_summary() -> Dict[str, int]:
-    """Minimal in-memory diagnostics (used_count)."""
     return {"used_count": len(_used_in_session)}
 
 
-# SQL templates (Postgres; SKIP LOCKED prevents blocking)
-_SQL_ZERO_NOT_USED = """
-SELECT id, question, correct_answers
-FROM questions
-WHERE approved = TRUE
-  AND times_asked = 0
-  AND id <> ALL($1::int[])
-ORDER BY RANDOM()
+# -----------------------------
+# SQL
+# -----------------------------
+
+_SQL_PICK = """
+SELECT q.id, q.question, q.correct_answers
+FROM questions q
+WHERE q.approved = TRUE
+  AND ( $2::int[] IS NULL OR q.id <> ALL($2::int[]) )
+ORDER BY
+  (
+    SELECT COALESCE(u.times_asked, 0)
+    FROM question_usage u
+    WHERE u.question_id = q.id
+      AND u.guild_id = $1
+  ) ASC,
+  q.times_asked ASC,
+  RANDOM()
 LIMIT 1
 FOR UPDATE SKIP LOCKED
 """
 
-_SQL_ZERO_ANY = """
-SELECT id, question, correct_answers
-FROM questions
-WHERE approved = TRUE
-  AND times_asked = 0
-ORDER BY RANDOM()
-LIMIT 1
-FOR UPDATE SKIP LOCKED
-"""
-
-_SQL_LEAST_NOT_USED = """
-SELECT id, question, correct_answers
-FROM questions
-WHERE approved = TRUE
-  AND id <> ALL($1::int[])
-ORDER BY times_asked ASC, RANDOM()
-LIMIT 1
-FOR UPDATE SKIP LOCKED
-"""
-
-_SQL_LEAST_ANY = """
-SELECT id, question, correct_answers
-FROM questions
-WHERE approved = TRUE
-ORDER BY times_asked ASC, RANDOM()
-LIMIT 1
-FOR UPDATE SKIP LOCKED
-"""
-
-_SQL_INCREMENT = """
+_SQL_INCREMENT_GLOBAL = """
 UPDATE questions
 SET times_asked = times_asked + 1
 WHERE id = $1
 """
 
+_SQL_INCREMENT_GUILD = """
+INSERT INTO question_usage (guild_id, question_id, times_asked, last_asked_at)
+VALUES ($1, $2, 1, NOW())
+ON CONFLICT (guild_id, question_id)
+DO UPDATE SET
+  times_asked = question_usage.times_asked + 1,
+  last_asked_at = NOW()
+"""
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
 
 def _parse_answers(raw: Any) -> List[str]:
-    """Normalize stored correct_answers into a list of strings."""
     if raw is None:
         return []
     if isinstance(raw, list):
@@ -107,68 +97,50 @@ def _parse_answers(raw: Any) -> List[str]:
     return [str(raw)]
 
 
-async def _fetchrow(conn, sql: str, params: Optional[List] = None):
-    """Helper to call fetchrow with or without params."""
-    if params:
-        # asyncpg accepts the Python list to map to an int[]
-        return await conn.fetchrow(sql, params)
-    return await conn.fetchrow(sql)
+# -----------------------------
+# Public API
+# -----------------------------
 
-
-async def get_random_question() -> Optional[Question]:
+async def get_random_question(guild_id: int) -> Optional[Question]:
     """
-    Fetch a random question, prioritizing zero-times_asked items.
-
-    Priority:
-      1) times_asked = 0 and NOT used in session
-      2) times_asked = 0 (any)
-      3) lowest times_asked and NOT used in session
-      4) lowest times_asked (any)
-
-    Selection and times_asked increment executed inside a single transaction.
+    Pick a question for a guild.
+    Fresh per-guild first, then global freshness.
     """
     async with _question_lock:
         pool = await get_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                used_list: List[int] = list(_used_in_session)
 
-                # build ordered attempts
-                attempts: List[tuple[str, Optional[List[int]]]] = []
-                if used_list:
-                    attempts.append((_SQL_ZERO_NOT_USED, used_list))
-                attempts.append((_SQL_ZERO_ANY, None))
+                used_list = list(_used_in_session) if _used_in_session else None
 
-                if used_list:
-                    attempts.append((_SQL_LEAST_NOT_USED, used_list))
-                attempts.append((_SQL_LEAST_ANY, None))
-
-                row = None
-                for sql, params in attempts:
-                    try:
-                        row = await _fetchrow(conn, sql, params)
-                    except Exception:
-                        # Log and continue to next attempt rather than blow up
-                        logger.exception("Question selection query failed; continuing. SQL head: %s", sql.splitlines()[0].strip())
-                        row = None
-
-                    if row:
-                        break
+                row = await conn.fetchrow(
+                    _SQL_PICK,
+                    guild_id,
+                    used_list,
+                )
 
                 if not row:
-                    # no approved questions or DB empty
-                    logger.debug("No question found in DB (approved rows may be empty).")
+                    logger.debug("No question found")
                     return None
 
                 qid = row["id"]
-
-                # mark used in session
                 _used_in_session.add(qid)
 
-                # increment times_asked within same transaction
-                await conn.execute(_SQL_INCREMENT, qid)
+                # increment global
+                await conn.execute(_SQL_INCREMENT_GLOBAL, qid)
 
-    # parse answers outside the transaction
-    answers_list = _parse_answers(row["correct_answers"])
-    logger.debug("Selected question id=%s (question prefix=%s)", qid, (row["question"] or "")[:80])
-    return {"id": qid, "question": row["question"], "answers": answers_list}
+                # increment per-guild
+                await conn.execute(
+                    _SQL_INCREMENT_GUILD,
+                    guild_id,
+                    qid,
+                )
+
+    answers = _parse_answers(row["correct_answers"])
+    logger.debug("Selected question id=%s", qid)
+
+    return {
+        "id": qid,
+        "question": row["question"],
+        "answers": answers,
+    }

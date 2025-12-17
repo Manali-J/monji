@@ -12,7 +12,7 @@ from monji_bot.common.state import GameState
 
 async def ask_next_round(channel: discord.TextChannel, state: GameState):
     """Ask the next question in a multi-round game."""
-    q = await get_random_question()
+    q = await get_random_question(channel.guild.id)
     if q is None:
         await channel.send(
             "I ran out of questions. Blame whoever configured me."

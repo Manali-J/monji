@@ -9,7 +9,7 @@ from monji_bot.common.state import GameState
 
 async def ask_next_scramble_round(channel: discord.TextChannel, state: GameState):
     """Ask the next scramble word."""
-    row = await get_random_scramble_word()
+    row = await get_random_scramble_word(channel.guild.id)
     if row is None:
         await channel.send("I ran out of scramble words. This is awkward.")
         state.in_progress = False
