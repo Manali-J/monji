@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 
 from ..db import get_pool
 
@@ -10,33 +10,34 @@ logger = logging.getLogger(__name__)
 
 ScrambleWord = Dict[str, object]
 
-# Track words used per guild in the current session
-_used_in_session: Dict[int, Set[int]] = {}
-
 _scramble_lock = asyncio.Lock()
 
+# -----------------------------
+# SQL
+# -----------------------------
 
-def reset_scramble_session(guild_id: Optional[int] = None) -> None:
-    if guild_id is None:
-        _used_in_session.clear()
-    else:
-        _used_in_session.pop(guild_id, None)
-
-
-_SQL_PICK = """
+# 1️⃣ Pick an UNUSED word for this guild
+_SQL_PICK_UNUSED = """
 SELECT w.id, w.word
 FROM scramble_words w
 WHERE w.approved = TRUE
-  AND ( $2::int[] IS NULL OR w.id <> ALL($2::int[]) )
-ORDER BY
-  (
-    SELECT COALESCE(u.times_asked, 0)
+  AND NOT EXISTS (
+    SELECT 1
     FROM scramble_usage u
-    WHERE u.word_id = w.id
-      AND u.guild_id = $1
-  ) ASC,
-  w.times_asked ASC,
-  RANDOM()
+    WHERE u.guild_id = $1
+      AND u.word_id = w.id
+  )
+ORDER BY RANDOM()
+LIMIT 1
+FOR UPDATE SKIP LOCKED
+"""
+
+# 2️⃣ Fallback: pick ANY word
+_SQL_PICK_ANY = """
+SELECT w.id, w.word
+FROM scramble_words w
+WHERE w.approved = TRUE
+ORDER BY RANDOM()
 LIMIT 1
 FOR UPDATE SKIP LOCKED
 """
@@ -56,6 +57,17 @@ DO UPDATE SET
   last_asked_at = NOW()
 """
 
+# -----------------------------
+# Compatibility (kept)
+# -----------------------------
+
+def reset_scramble_session(*args, **kwargs) -> None:
+    # No session state anymore — kept to avoid breaking imports
+    return
+
+# -----------------------------
+# Public API
+# -----------------------------
 
 async def get_random_scramble_word(guild_id: int) -> Optional[ScrambleWord]:
     async with _scramble_lock:
@@ -63,25 +75,30 @@ async def get_random_scramble_word(guild_id: int) -> Optional[ScrambleWord]:
         async with pool.acquire() as conn:
             async with conn.transaction():
 
-                used = _used_in_session.setdefault(guild_id, set())
-                used_list = list(used) if len(used) > 0 else None
-
+                # Step 1: try unused word
                 row = await conn.fetchrow(
-                    _SQL_PICK,
+                    _SQL_PICK_UNUSED,
                     guild_id,
-                    used_list,
                 )
+
+                # Step 2: fallback to any word
+                if not row:
+                    row = await conn.fetchrow(_SQL_PICK_ANY)
 
                 if not row:
                     return None
 
                 word_id = row["id"]
-                used.add(word_id)
+                word = row["word"]
 
                 await conn.execute(_SQL_INCREMENT_GLOBAL, word_id)
-                await conn.execute(_SQL_INCREMENT_GUILD, guild_id, word_id)
+                await conn.execute(
+                    _SQL_INCREMENT_GUILD,
+                    guild_id,
+                    word_id,
+                )
 
     return {
         "id": word_id,
-        "word": row["word"],
+        "word": word,
     }
