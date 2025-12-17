@@ -1,11 +1,11 @@
 """
-Scramble word selector (guild-aware, DB-safe).
+Scramble word selector (session-aware, guild-safe).
 
 Behavior:
 - Prefer words never used in THIS guild
 - Auto-relax to least-used per guild
 - Break ties using global times_asked
-- Avoid repeats via DB cooldown window
+- Avoid repeats within the same session
 - Selection + increments are atomic
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Dict, Optional
 
 from ..db import get_pool
@@ -21,21 +22,23 @@ logger = logging.getLogger(__name__)
 
 ScrambleWord = Dict[str, object]
 
-# Serialize DB access (per process)
 _scramble_lock = asyncio.Lock()
 
 # -----------------------------
-# Compatibility API (NO-OP)
+# Session state (SAFE)
 # -----------------------------
+
+_current_session_id: Optional[str] = None
+
 
 def reset_scramble_session() -> None:
     """
-    Compatibility no-op.
-
-    Scramble no longer tracks session state in memory.
-    Repeats are prevented at the DB level.
+    Start a new scramble session.
     """
-    logger.info("reset_scramble_session called (no-op)")
+    global _current_session_id
+    _current_session_id = str(uuid.uuid4())
+    logger.info("New scramble session started: %s", _current_session_id)
+
 
 # -----------------------------
 # SQL
@@ -47,10 +50,10 @@ FROM scramble_words w
 WHERE w.approved = TRUE
   AND NOT EXISTS (
     SELECT 1
-    FROM scramble_usage u
-    WHERE u.guild_id = $1
-      AND u.word_id = w.id
-      AND u.last_asked_at > NOW() - INTERVAL '30 minutes'
+    FROM scramble_session_words s
+    WHERE s.guild_id = $1
+      AND s.session_id = $2
+      AND s.word_id = w.id
   )
 ORDER BY
   (
@@ -80,11 +83,22 @@ DO UPDATE SET
   last_asked_at = NOW()
 """
 
+_SQL_MARK_SESSION = """
+INSERT INTO scramble_session_words (guild_id, session_id, word_id)
+VALUES ($1, $2, $3)
+ON CONFLICT DO NOTHING
+"""
+
 # -----------------------------
 # Public API
 # -----------------------------
 
 async def get_random_scramble_word(guild_id: int) -> Optional[ScrambleWord]:
+    global _current_session_id
+
+    if _current_session_id is None:
+        reset_scramble_session()
+
     async with _scramble_lock:
         pool = await get_pool()
         async with pool.acquire() as conn:
@@ -93,33 +107,30 @@ async def get_random_scramble_word(guild_id: int) -> Optional[ScrambleWord]:
                 row = await conn.fetchrow(
                     _SQL_PICK,
                     guild_id,
+                    _current_session_id,
                 )
 
                 if not row:
-                    logger.debug(
-                        "No eligible scramble words found for guild %s",
-                        guild_id,
-                    )
+                    logger.debug("No eligible scramble words for guild %s", guild_id)
                     return None
 
                 word_id = row["id"]
                 word = row["word"]
 
                 await conn.execute(_SQL_INCREMENT_GLOBAL, word_id)
+                await conn.execute(_SQL_INCREMENT_GUILD, guild_id, word_id)
                 await conn.execute(
-                    _SQL_INCREMENT_GUILD,
+                    _SQL_MARK_SESSION,
                     guild_id,
+                    _current_session_id,
                     word_id,
                 )
 
     logger.debug(
-        "Selected scramble word id=%s word=%s guild=%s",
+        "Selected scramble word id=%s guild=%s session=%s",
         word_id,
-        word,
         guild_id,
+        _current_session_id,
     )
 
-    return {
-        "id": word_id,
-        "word": word,
-    }
+    return {"id": word_id, "word": word}
