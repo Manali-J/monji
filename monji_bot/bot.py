@@ -288,7 +288,7 @@ async def on_voice_state_update(member, before, after):
         # First human joins → start recording
         if len(humans) == 1:
             await text_channel.send(
-                f"/join channel {AUTO_RECORD_VC_ID}"
+                f"/join channel #snowy-voices"
             )
 
     # ---------- USER LEFT VC ----------
