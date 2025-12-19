@@ -15,6 +15,13 @@ FINAL_WAIT_SECONDS = 10
 WINNER_RESOLUTION_DELAY = 0.8
 ROUND_TRANSITION_DELAY = 1.0
 
+# -----------------------------
+# CRAIG AUTO-RECORD CONFIG
+# -----------------------------
+AUTO_RECORD_VC_ID = 1451562698306355342  # VC to auto-record
+CRAIG_COMMAND_CHANNEL_ID = 1451564976316878889  # text channel Craig reads
+
+
 MODE_TRIVIA = "trivia"
 MODE_SCRAMBLE = "scramble"
 

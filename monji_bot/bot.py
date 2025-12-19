@@ -7,7 +7,8 @@ from discord import app_commands
 from monji_bot.llm.commentary import generate_reply
 from monji_bot.scramble.scramble_lifecycle import ask_next_scramble_round, end_scramble_game
 from monji_bot.scramble.scramble_manager import reset_scramble_session
-from monji_bot.trivia.constants import GAMES, EVENT_MENTION, KEY_TEXT, MODE_TRIVIA, MODE_SCRAMBLE
+from monji_bot.trivia.constants import GAMES, EVENT_MENTION, KEY_TEXT, MODE_TRIVIA, MODE_SCRAMBLE, AUTO_RECORD_VC_ID, \
+    CRAIG_COMMAND_CHANNEL_ID
 from monji_bot.trivia.lifecycle import end_game, ask_next_round
 from monji_bot.trivia.resolution import resolve_round_winner
 from monji_bot.common.state import GameState, CorrectCandidate
@@ -265,6 +266,31 @@ async def on_message(message: discord.Message):
         return
 
     await bot.process_commands(message)
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    # Ignore bots (including Craig & Monji)
+    if member.bot:
+        return
+
+    guild = member.guild
+    text_channel = guild.get_channel(CRAIG_COMMAND_CHANNEL_ID)
+    if text_channel is None:
+        return
+
+    # ---------- USER JOINED VC ----------
+    if after.channel and after.channel.id == AUTO_RECORD_VC_ID:
+        # First human joined
+        humans = [m for m in after.channel.members if not m.bot]
+        if len(humans) == 1:
+            await text_channel.send(":join")
+
+    # ---------- USER LEFT VC ----------
+    if before.channel and before.channel.id == AUTO_RECORD_VC_ID:
+        # Last human left
+        humans = [m for m in before.channel.members if not m.bot]
+        if len(humans) == 0:
+            await text_channel.send(":leave")
 
 # -----------------------------
 # ENTRY POINT
