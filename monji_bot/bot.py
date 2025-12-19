@@ -269,28 +269,35 @@ async def on_message(message: discord.Message):
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    # Ignore bots (including Craig & Monji)
+    # Ignore bots (Craig, Monji, etc.)
     if member.bot:
         return
 
     guild = member.guild
+    if guild is None:
+        return
+
     text_channel = guild.get_channel(CRAIG_COMMAND_CHANNEL_ID)
     if text_channel is None:
         return
 
     # ---------- USER JOINED VC ----------
     if after.channel and after.channel.id == AUTO_RECORD_VC_ID:
-        # First human joined
         humans = [m for m in after.channel.members if not m.bot]
+
+        # First human joins → start recording
         if len(humans) == 1:
-            await text_channel.send(":join")
+            await text_channel.send(
+                f"/join channel {AUTO_RECORD_VC_ID}"
+            )
 
     # ---------- USER LEFT VC ----------
     if before.channel and before.channel.id == AUTO_RECORD_VC_ID:
-        # Last human left
         humans = [m for m in before.channel.members if not m.bot]
+
+        # Last human leaves → stop recording
         if len(humans) == 0:
-            await text_channel.send(":leave")
+            await text_channel.send("/stop")
 
 # -----------------------------
 # ENTRY POINT
