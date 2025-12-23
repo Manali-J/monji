@@ -267,6 +267,46 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
+@bot.tree.command(name="about", description="About Monji.")
+async def about(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="🦆 Monji",
+            description=(
+                "Monji is an interactive quiz bot for Discord.\n\n"
+                "**Games available:**\n"
+                "• 🧠 Trivia — fast-paced multiplayer questions\n"
+                "• 🔀 Scramble — word scramble challenges\n\n"
+                "**How to play:**\n"
+                "• `/trivia <rounds>` to start trivia\n"
+                "• `/scramble <rounds>` to start scramble\n\n"
+                "Built for fun, chaos, and smart servers."
+            ),
+        ),
+        ephemeral=True,
+    )
+
+@bot.tree.command(name="help", description="Show Monji commands.")
+async def help_command(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="🦆 Monji Help",
+            description=(
+                "**Game Commands:**\n"
+                "• `/trivia <rounds>` — Start a trivia game\n"
+                "• `/trivia_stop` — Stop trivia\n"
+                "• `/scramble <rounds>` — Start a scramble game\n"
+                "• `/scramble_stop` — Stop scramble\n\n"
+                "**Other Commands:**\n"
+                "• `/leaderboard` — View top players\n"
+                "• `/ping` — Check if Monji is awake\n\n"
+                "Monji is built for multiplayer quiz chaos.\n"
+                "Pick a channel and start playing."
+            ),
+        ),
+        ephemeral=True,
+    )
+
 # -----------------------------
 # ENTRY POINT
 # -----------------------------
